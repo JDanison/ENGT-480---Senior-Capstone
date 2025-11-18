@@ -1,0 +1,38 @@
+Explaining I2C Ports on Heltec Board
+https://youtu.be/sBYHlvLupxw?si=b7XVg2ydGKLCdknX
+
+List of Pins:
+C:\Users\John\AppData\Local\Arduino15\packages\Heltec-esp32\hardware\esp32\0.0.9\variants\WIFI_LoRa_32_V3
+https://youtu.be/OBQidEVssto?si=cPCssqgjQx6ceKKm
+
+SPI Work-Around:
+// Example: create a second SPI instance (VSPI) and use SD on it
+#include <SPI.h>
+#include <SD.h>
+
+// pick free pins on your Heltec board (change to pins you have available)
+#define SDCARD_MOSI 23
+#define SDCARD_MISO 19
+#define SDCARD_SCK  18
+#define SDCARD_CS   5
+
+SPIClass SPI_2(VSPI);                 // or HSPI as needed
+// initialize with (sck, miso, mosi, ss)
+void setup(){
+  SPI_2.begin(SDCARD_SCK, SDCARD_MISO, SDCARD_MOSI, SDCARD_CS);
+  if (!SD.begin(SDCARD_CS, SPI_2)) {
+    Serial.println("SD begin failed");
+  } else {
+    Serial.println("SD OK");
+  }
+}
+
+Status LED Source:
+https://www.lcsc.com/product-detail/C2827258.html?utm_source=chatgpt.com
+
+Heltec Things:
+https://heltec.org/wp-content/uploads/2023/09/pin.png
+https://heltec.org/project/wifi-lora-32-v3/
+
+Fritizing Models:
+https://www.ivytech-mems.org/BioMEMS_Kit/Fritzing.html
