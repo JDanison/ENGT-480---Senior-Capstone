@@ -5,16 +5,20 @@ List of Pins:
 C:\Users\John\AppData\Local\Arduino15\packages\Heltec-esp32\hardware\esp32\0.0.9\variants\WIFI_LoRa_32_V3
 https://youtu.be/OBQidEVssto?si=cPCssqgjQx6ceKKm
 
+I2C Pins:
+SDA = 41;
+SCL = 42;
+
 SPI Work-Around:
 // Example: create a second SPI instance (VSPI) and use SD on it
 #include <SPI.h>
 #include <SD.h>
 
 // pick free pins on your Heltec board (change to pins you have available)
-#define SDCARD_MOSI 23
-#define SDCARD_MISO 19
-#define SDCARD_SCK  18
-#define SDCARD_CS   5
+#define SDCARD_MOSI 34 #Brown Wire
+#define SDCARD_MISO 33 #Grey Wire
+#define SDCARD_SCK  35 #White Wire
+#define SDCARD_CS   36 #Yellow Wire
 
 SPIClass SPI_2(VSPI);                 // or HSPI as needed
 // initialize with (sck, miso, mosi, ss)
@@ -36,3 +40,9 @@ https://heltec.org/project/wifi-lora-32-v3/
 
 Fritizing Models:
 https://www.ivytech-mems.org/BioMEMS_Kit/Fritzing.html
+
+LIS3DH Tutorial:
+https://learn.adafruit.com/adafruit-lis3dh-triple-axis-accelerometer-breakout/pinouts
+
+SHT45 Tutorial:
+http://learn.adafruit.com/adafruit-sht40-temperature-humidity-sensor/arduino
