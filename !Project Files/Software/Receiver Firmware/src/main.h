@@ -20,6 +20,7 @@
 #include <SPIFFS.h>     // SPIFFS storage library
 #include <WiFi.h>       // WiFi Library
 #include <Wire.h>       // I2C Library
+#include <time.h>       // Time library for NTP
 //#include <chrono>       // Advanced Time Library - Commented out due to conflicts
 //#include <Packet.h>     // Custom Packet Library
 
@@ -27,6 +28,7 @@
 #include "OLEDDisplay_Module.h"
 #include "SHT45_Module.h"
 #include "LIS3DH_Module.h"
+#include "SDCard_Module.h"
 
 
 /**
@@ -52,7 +54,17 @@
 #define SERIAL_BAUD_RATE    115200  // Serial monitor baud rate
 
 // Timing Configuration
-#define SENSOR_READ_INTERVAL 2000   // Sensor reading interval in milliseconds
+#define SENSOR_READ_INTERVAL 100    // Sensor reading interval in milliseconds (fast for demo)
+#define ACCEL_THRESHOLD      2.0    // Accelerometer threshold in g's
+#define EVENT_SAMPLE_COUNT   20     // Number of accelerometer samples to capture per event
+
+// WiFi Configuration (for time sync)
+// NOTE: Update these with your WiFi credentials before deploying
+#define WIFI_SSID           "NetHouse"      // Replace with your WiFi name
+#define WIFI_PASSWORD       "@AAMBN3Ts4G0od$&"  // Replace with your WiFi password
+#define NTP_SERVER          "pool.ntp.org"      // NTP server for time sync
+#define GMT_OFFSET_SEC      -18000              // EST = GMT-5 (5 hours * 3600 seconds)
+#define DAYLIGHT_OFFSET_SEC 3600                // Daylight saving time offset (1 hour)
 
 
 /**
@@ -62,6 +74,7 @@ extern TwoWire I2C_Sensors;              // Secondary I2C bus for external senso
 extern OLEDDisplay_Module oledDisplay;   // OLED display module
 extern SHT45_Module sht45;               // SHT45 temperature/humidity sensor
 extern LIS3DH_Module lis3dh;             // LIS3DH accelerometer
+extern SDCard_Module sdCard;             // SD card module
 
 
 /**
@@ -71,23 +84,18 @@ extern LIS3DH_Module lis3dh;             // LIS3DH accelerometer
 void setup();
 void loop();
 
-// SD Card functions
-bool initSDCard();
-bool writeToSDCard(const char* filename, const char* message);
-String readFromSDCard(const char* filename);
-void listSDCardFiles();
+// Event capture functions
+void captureEvent();
+void playbackEvents();
+
+// Time sync functions
+bool syncTime();
+String getFormattedTime();
+void offloadData();
 
 // Legacy function prototypes (to be implemented)
 void decToHex(int decimal, char * hex);   // Conversion from Decimal to Hex
 int hexToDec(const char * hex);           // Conversion from Hex to Decimal
 void clearRSSIData();                     // Clear RSSI Data File
-
-
-/**
- * Feature Flags - Comment out to disable features
- */
-#define HELTEC_OLED_ENABLED     // Enable Heltec OLED Display
-//#define ENABLE_SENSORS          // Enable I2C sensor reading (SHT45 & LIS3DH)
-#define ENABLE_SDCARD           // Enable SD card functionality
 
 #endif

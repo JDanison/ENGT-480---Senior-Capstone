@@ -17,6 +17,13 @@ bool OLEDDisplay_Module::begin() {
     Heltec.begin(true /*DisplayEnable*/, false /*LoRa Disable*/, true /*Serial Enable*/);
     _initialized = true;
     
+    // Set brightness and contrast to maximum
+    Heltec.display->setBrightness(255);
+    Heltec.display->setContrast(255);
+    
+    // Normal display mode (not inverted)
+    Heltec.display->normalDisplay();
+    
     clear();
     displayMessage("OLED Display", "Initialized");
     update();
