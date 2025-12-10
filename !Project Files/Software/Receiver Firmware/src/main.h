@@ -60,11 +60,13 @@
 
 // WiFi Configuration (for time sync)
 // NOTE: Update these with your WiFi credentials before deploying
-#define WIFI_SSID           "NetHouse"      // Replace with your WiFi name
-#define WIFI_PASSWORD       "@AAMBN3Ts4G0od$&"  // Replace with your WiFi password
-#define NTP_SERVER          "pool.ntp.org"      // NTP server for time sync
-#define GMT_OFFSET_SEC      -18000              // EST = GMT-5 (5 hours * 3600 seconds)
-#define DAYLIGHT_OFFSET_SEC 3600                // Daylight saving time offset (1 hour)
+#define WIFI_SSID_PRIMARY       "NetHouse"              // Primary WiFi network
+#define WIFI_PASSWORD_PRIMARY   "@AAMBN3Ts4G0od$&"      // Primary WiFi password
+#define WIFI_SSID_BACKUP        "PAL3.0"        // Backup WiFi network (replace with your backup)
+#define WIFI_PASSWORD_BACKUP    "Pu&$rl)u3ePu&"    // Backup WiFi password
+#define NTP_SERVER              "pool.ntp.org"          // NTP server for time sync
+#define GMT_OFFSET_SEC          -18000                  // EST = GMT-5 (5 hours * 3600 seconds)
+#define DAYLIGHT_OFFSET_SEC     3600                    // Daylight saving time offset (1 hour)
 
 
 /**
@@ -85,7 +87,7 @@ void setup();
 void loop();
 
 // Event capture functions
-void captureEvent();
+void captureEvent(float triggerX, float triggerY, float triggerZ);
 void playbackEvents();
 
 // Time sync functions
