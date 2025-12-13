@@ -38,6 +38,10 @@ AccelSample accelBuffer[BUFFER_SIZE];
 int bufferIndex = 0;
 bool bufferFilled = false;
 
+// WiFi connection timeouts
+#define WIFI_CONNECT_TIMEOUT 10  // seconds
+#define NTP_SYNC_TIMEOUT 10      // seconds
+
 // Add sample to circular buffer
 void addToBuffer(float x, float y, float z) {
   accelBuffer[bufferIndex].x = x;
@@ -53,16 +57,15 @@ void addToBuffer(float x, float y, float z) {
 }
 
 /**
- * Sync time via WiFi using NTP
+ * Connect to WiFi (try primary, then backup)
+ * Returns true if connected, false otherwise
  */
-bool syncTime() {
-  Serial.println("\n=== TIME SYNC STARTING ===");
-  
+bool connectToWiFi() {
   // Try primary WiFi first
   Serial.printf("Trying primary WiFi: %s\n", WIFI_SSID_PRIMARY);
   WiFi.begin(WIFI_SSID_PRIMARY, WIFI_PASSWORD_PRIMARY);
   
-  int timeout = 10; // 10 second timeout for primary
+  int timeout = WIFI_CONNECT_TIMEOUT;
   while (WiFi.status() != WL_CONNECTED && timeout > 0) {
     delay(1000);
     Serial.print(".");
@@ -79,7 +82,7 @@ bool syncTime() {
     delay(100);
     WiFi.begin(WIFI_SSID_BACKUP, WIFI_PASSWORD_BACKUP);
     
-    timeout = 10; // 10 second timeout for backup
+    timeout = WIFI_CONNECT_TIMEOUT;
     while (WiFi.status() != WL_CONNECTED && timeout > 0) {
       delay(1000);
       Serial.print(".");
@@ -91,7 +94,6 @@ bool syncTime() {
   // Check if either connection succeeded
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Both WiFi networks failed!");
-    Serial.println("Time sync FAILED");
     return false;
   }
   
@@ -99,6 +101,19 @@ bool syncTime() {
   Serial.printf("Connected to: %s\n", WiFi.SSID().c_str());
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
+  return true;
+}
+
+/**
+ * Sync time via WiFi using NTP
+ */
+bool syncTime() {
+  Serial.println("\n=== TIME SYNC STARTING ===");
+  
+  if (!connectToWiFi()) {
+    Serial.println("Time sync FAILED");
+    return false;
+  }
   
   // Configure time with NTP
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
@@ -107,7 +122,7 @@ bool syncTime() {
   
   // Wait for time to be set
   struct tm timeinfo;
-  timeout = 10;
+  int timeout = NTP_SYNC_TIMEOUT;
   while (!getLocalTime(&timeinfo) && timeout > 0) {
     delay(1000);
     Serial.print(".");
@@ -195,23 +210,9 @@ String getFormattedTime() {
 }
 
 /**
- * Offload data: Playback events, resync time, and clear SD card
+ * Delete all event files from SD card
  */
-void offloadData() {
-  Serial.println("\n");
-  Serial.println("========================================");
-  Serial.println("        DATA OFFLOAD INITIATED");
-  Serial.println("========================================\n");
-  
-  // Step 1: Playback all events
-  playbackEvents();
-  
-  // Step 2: Resync time
-  Serial.println("\n--- Resyncing Time ---");
-  syncTime();
-  
-  // Step 3: Clear SD card
-  Serial.println("\n--- Clearing SD Card ---");
+void deleteAllEventFiles() {
   if (sdCard.fileExists("/events")) {
     File root = SD.open("/events");
     if (root && root.isDirectory()) {
@@ -233,6 +234,27 @@ void offloadData() {
   } else {
     Serial.println("No events directory found.");
   }
+}
+
+/**
+ * Offload data: Playback events, resync time, and clear SD card
+ */
+void offloadData() {
+  Serial.println("\n");
+  Serial.println("========================================");
+  Serial.println("        DATA OFFLOAD INITIATED");
+  Serial.println("========================================\n");
+  
+  // Step 1: Playback all events
+  playbackEvents();
+  
+  // Step 2: Resync time
+  Serial.println("\n--- Resyncing Time ---");
+  syncTime();
+  
+  // Step 3: Clear SD card
+  Serial.println("\n--- Clearing SD Card ---");
+  deleteAllEventFiles();
   
   Serial.println("\n========================================");
   Serial.println("        DATA OFFLOAD COMPLETE");
@@ -440,85 +462,86 @@ void setup() {
   delay(2000);
 }
 
+/**
+ * Handle manual time setting from serial input
+ */
+void handleManualTimeSet() {
+  Serial.println("\nEnter date/time (format: YYYY-MM-DD HH:MM:SS):");
+  Serial.println("Example: 2025-12-10 14:30:00");
+  
+  // Wait for user input (timeout after 30 seconds)
+  unsigned long timeout = millis() + 30000;
+  String dateTimeInput = "";
+  
+  while (millis() < timeout) {
+    if (Serial.available() > 0) {
+      char c = Serial.read();
+      if (c == '\n' || c == '\r') {
+        if (dateTimeInput.length() > 0) {
+          setTimeManually(dateTimeInput.c_str());
+          break;
+        }
+      } else {
+        dateTimeInput += c;
+        Serial.print(c); // Echo character
+      }
+    }
+  }
+  
+  if (dateTimeInput.length() == 0) {
+    Serial.println("\nTimeout - no input received");
+  }
+}
+
+/**
+ * Process serial commands
+ */
+void processSerialCommand(char command) {
+  switch (command) {
+    case 'c':
+    case 'C':
+      Serial.println("\n=== CLEARING SD CARD ===");
+      deleteAllEventFiles();
+      Serial.println("=== SD CARD CLEARED ===\n");
+      break;
+      
+    case 's':
+    case 'S':
+      syncTime();
+      break;
+      
+    case 'm':
+    case 'M':
+      handleManualTimeSet();
+      break;
+      
+    case 'o':
+    case 'O':
+      offloadData();
+      break;
+      
+    case 't':
+    case 'T':
+      Serial.print("Current time: ");
+      Serial.println(getFormattedTime());
+      break;
+      
+    case 'd':
+    case 'D':
+      playbackEvents();
+      break;
+      
+    default:
+      // Ignore unknown commands
+      break;
+  }
+}
+
 void loop() {
   // Check for serial commands
   if (Serial.available() > 0) {
     char command = Serial.read();
-    
-    if (command == 'c' || command == 'C') {
-      // Clear SD card
-      Serial.println("\n=== CLEARING SD CARD ===");
-      
-      // Delete all event files
-      if (sdCard.fileExists("/events")) {
-        File root = SD.open("/events");
-        if (root && root.isDirectory()) {
-          File file = root.openNextFile();
-          while (file) {
-            if (!file.isDirectory()) {
-              String filename = String(file.name());
-              String fullPath = "/events/" + filename;
-              file.close();
-              sdCard.deleteFile(fullPath.c_str());
-            } else {
-              file.close();
-            }
-            file = root.openNextFile();
-          }
-          root.close();
-          Serial.println("All event files deleted.");
-        }
-      } else {
-        Serial.println("No events directory found.");
-      }
-      
-      Serial.println("=== SD CARD CLEARED ===\n");
-    }
-    else if (command == 's' || command == 'S') {
-      // Sync time via WiFi
-      syncTime();
-    }
-    else if (command == 'm' || command == 'M') {
-      // Manually set time from serial input
-      Serial.println("\nEnter date/time (format: YYYY-MM-DD HH:MM:SS):");
-      Serial.println("Example: 2025-12-10 14:30:00");
-      
-      // Wait for user input (timeout after 30 seconds)
-      unsigned long timeout = millis() + 30000;
-      String dateTimeInput = "";
-      
-      while (millis() < timeout) {
-        if (Serial.available() > 0) {
-          char c = Serial.read();
-          if (c == '\n' || c == '\r') {
-            if (dateTimeInput.length() > 0) {
-              setTimeManually(dateTimeInput.c_str());
-              break;
-            }
-          } else {
-            dateTimeInput += c;
-            Serial.print(c); // Echo character
-          }
-        }
-      }
-      
-      if (dateTimeInput.length() == 0) {
-        Serial.println("\nTimeout - no input received");
-      }
-    }
-    else if (command == 'o' || command == 'O') {
-      // Offload data (playback, resync, clear)
-      offloadData();
-    }
-    else if (command == 't' || command == 'T') {
-      // Display current time
-      Serial.print("Current time: ");
-      Serial.println(getFormattedTime());
-    }
-    else if (command == 'd' || command == 'D') {
-      // Display all stored events
-      playbackEvents();
-    }
+    processSerialCommand(command);
   }
   
   // Read temperature and humidity
