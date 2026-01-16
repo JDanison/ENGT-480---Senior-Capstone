@@ -1,7 +1,7 @@
 /*
   Filename: LIS3DH_Module.cpp
   LIS3DH Accelerometer Module Implementation
-  Authors: Alex Bolinger, John Danison, Grant Sylvester
+  Author: John Danison
   Date Created: 12/6/2025
 
   Description: Implementation file for LIS3DH accelerometer functionality

@@ -1,7 +1,7 @@
 /*
   Filename: LIS3DH_Module.h
   LIS3DH Accelerometer Module Header
-  Authors: Alex Bolinger, John Danison, Grant Sylvester
+  Author: John Danison
   Date Created: 12/6/2025
 
   Description: Header file for LIS3DH accelerometer functionality

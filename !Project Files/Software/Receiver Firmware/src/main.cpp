@@ -453,44 +453,12 @@ void setup() {
   Serial.printf("Threshold: %.1fg on any axis\n", ACCEL_THRESHOLD);
   Serial.println("\n--- Serial Commands ---");
   Serial.println("  s - Sync time via WiFi (requires WiFi credentials in main.h)");
-  Serial.println("  m - Manually set time (format: YYYY-MM-DD HH:MM:SS)");
   Serial.println("  t - Display current time");
   Serial.println("  d - Display all stored events");
   Serial.println("  c - Clear all events from SD card");
   Serial.println("  o - Offload data (playback events, resync time, clear SD)");
   Serial.println("-----------------------\n");
   delay(2000);
-}
-
-/**
- * Handle manual time setting from serial input
- */
-void handleManualTimeSet() {
-  Serial.println("\nEnter date/time (format: YYYY-MM-DD HH:MM:SS):");
-  Serial.println("Example: 2025-12-10 14:30:00");
-  
-  // Wait for user input (timeout after 30 seconds)
-  unsigned long timeout = millis() + 30000;
-  String dateTimeInput = "";
-  
-  while (millis() < timeout) {
-    if (Serial.available() > 0) {
-      char c = Serial.read();
-      if (c == '\n' || c == '\r') {
-        if (dateTimeInput.length() > 0) {
-          setTimeManually(dateTimeInput.c_str());
-          break;
-        }
-      } else {
-        dateTimeInput += c;
-        Serial.print(c); // Echo character
-      }
-    }
-  }
-  
-  if (dateTimeInput.length() == 0) {
-    Serial.println("\nTimeout - no input received");
-  }
 }
 
 /**
@@ -508,11 +476,6 @@ void processSerialCommand(char command) {
     case 's':
     case 'S':
       syncTime();
-      break;
-      
-    case 'm':
-    case 'M':
-      handleManualTimeSet();
       break;
       
     case 'o':

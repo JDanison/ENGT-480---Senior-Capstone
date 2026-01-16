@@ -1,9 +1,9 @@
 /*
   Filename: main.h
   Heletec Receiver
-  Authors: Alex Bolinger, John Danison, Grant Sylvester
+  Author: John Danison
 
-  Last Updated: 12/6/2025
+  Last Updated: 12/16/2025
 */
 
 #ifndef main_h

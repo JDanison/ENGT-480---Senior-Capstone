@@ -1,7 +1,7 @@
 /*
   Filename: OLEDDisplay_Module.cpp
   OLED Display Module Implementation
-  Authors: Alex Bolinger, John Danison, Grant Sylvester
+  Author: John Danison
   Date Created: 12/6/2025
 
   Description: Implementation file for OLED display functionality
