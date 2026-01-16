@@ -1,0 +1,290 @@
+/*
+  Filename: NAU7802_Module.cpp
+  NAU7802 24-bit ADC for Strain Gauge Module Implementation
+  Author: John Danison
+  Date Created: 1/16/2026
+
+  Description: Implementation file for NAU7802 ADC functionality
+*/
+
+#include "NAU7802_Module.h"
+
+NAU7802_Module::NAU7802_Module(TwoWire* wire, uint8_t address) 
+    : _wire(wire), _address(address), _initialized(false), _zeroOffset(0), _currentGain(NAU7802_GAIN_128) {
+}
+
+bool NAU7802_Module::begin() {
+    if (!isConnected()) {
+        Serial.println("NAU7802: Sensor not found!");
+        return false;
+    }
+    
+    Serial.println("NAU7802: Device detected, starting initialization...");
+    
+    // Reset all registers to default values
+    bool result = setBit(NAU7802_PU_CTRL, 0); // RR bit
+    if (!result) {
+        Serial.println("NAU7802: Reset failed!");
+        return false;
+    }
+    delay(10);
+    
+    // Clear reset bit
+    result = clearBit(NAU7802_PU_CTRL, 0);
+    if (!result) {
+        Serial.println("NAU7802: Clear reset failed!");
+        return false;
+    }
+    delay(10);
+    
+    // Power up digital and analog circuits
+    result = setBit(NAU7802_PU_CTRL, 1); // PUD bit
+    if (!result) {
+        Serial.println("NAU7802: Power up digital failed!");
+        return false;
+    }
+    
+    result = setBit(NAU7802_PU_CTRL, 2); // PUA bit
+    if (!result) {
+        Serial.println("NAU7802: Power up analog failed!");
+        return false;
+    }
+    
+    // Wait for power up to complete
+    delay(200);
+    
+    // Verify power up
+    uint8_t puCtrl = readRegister(NAU7802_PU_CTRL);
+    Serial.printf("NAU7802: PU_CTRL = 0x%02X\n", puCtrl);
+    if (!(puCtrl & 0x04)) {
+        Serial.println("NAU7802: Analog power not ready!");
+    }
+    if (!(puCtrl & 0x02)) {
+        Serial.println("NAU7802: Digital power not ready!");
+    }
+    
+    // Enable LDO (3.3V output for strain gauge excitation)
+    Serial.println("NAU7802: Enabling LDO...");
+    uint8_t powerReg = readRegister(NAU7802_POWER_REG);
+    powerReg |= 0x80; // Set PGA_LDOMODE bit (use internal LDO)
+    writeRegister(NAU7802_POWER_REG, powerReg);
+    
+    // Set LDO voltage to 3.3V
+    uint8_t ctrlReg = readRegister(NAU7802_CTRL1);
+    ctrlReg |= 0xC0; // Set VLDO bits to 11 for 3.3V
+    writeRegister(NAU7802_CTRL1, ctrlReg);
+    
+    delay(100); // Allow LDO to stabilize
+    
+    // Set default gain (128x for strain gauges)
+    if (!setGain(NAU7802_GAIN_128)) {
+        Serial.println("NAU7802: Failed to set gain!");
+        return false;
+    }
+    
+    // Set default sample rate (80 SPS - good balance of speed and noise)
+    if (!setSampleRate(NAU7802_SPS_80)) {
+        Serial.println("NAU7802: Failed to set sample rate!");
+        return false;
+    }
+    
+    // Calibrate AFE (Analog Front End)
+    if (!calibrateAFE()) {
+        Serial.println("NAU7802: Calibration failed!");
+        return false;
+    }
+    
+    Serial.println("NAU7802: Starting conversions...");
+    if (!setBit(NAU7802_PU_CTRL, 4)) {
+        Serial.println("NAU7802: Failed to start conversions!");
+        return false;
+    }
+    
+    delay(100); // Allow first conversion to complete
+    
+    // Verify CS bit is set and check for CR bit
+    uint8_t puCtrlAfterCS = readRegister(NAU7802_PU_CTRL);
+    Serial.printf("NAU7802: PU_CTRL after CS = 0x%02X\n", puCtrlAfterCS);
+    Serial.printf("NAU7802: CS bit (4) = %d\n", (puCtrlAfterCS >> 4) & 0x01);
+    Serial.printf("NAU7802: CR bit (5) = %d\n", (puCtrlAfterCS >> 5) & 0x01);
+    
+    _initialized = true;
+    Serial.println("NAU7802: Initialized successfully!");
+    return true;
+}
+
+bool NAU7802_Module::isConnected() {
+    _wire->beginTransmission(_address);
+    return (_wire->endTransmission() == 0);
+}
+
+bool NAU7802_Module::isDataReady() {
+    return getBit(NAU7802_PU_CTRL, 5); // Check CR (Conversion Ready) bit
+}
+
+int32_t NAU7802_Module::readRaw() {
+    if (!_initialized) {
+        Serial.println("NAU7802: Not initialized!");
+        return 0;
+    }
+    
+    // Wait for data to be ready (longer timeout for slow sample rates)
+    int timeout = 500; // 500ms timeout (covers 10 SPS = 100ms per sample)
+    while (!isDataReady() && timeout > 0) {
+        delay(1);
+        timeout--;
+    }
+    
+    if (timeout == 0) {
+        Serial.println("NAU7802: Data timeout!");
+        return 0;
+    }
+    
+    // Read 3 bytes of ADC data
+    uint8_t b2 = readRegister(NAU7802_ADCO_B2);
+    uint8_t b1 = readRegister(NAU7802_ADCO_B1);
+    uint8_t b0 = readRegister(NAU7802_ADCO_B0);
+    
+    // Combine into 24-bit signed value
+    int32_t value = ((int32_t)b2 << 16) | ((int32_t)b1 << 8) | b0;
+    
+    // Sign extend 24-bit to 32-bit
+    if (value & 0x800000) {
+        value |= 0xFF000000;
+    }
+    
+    return value;
+}
+
+int32_t NAU7802_Module::readAverage(uint8_t samples) {
+    int64_t sum = 0;
+    for (uint8_t i = 0; i < samples; i++) {
+        sum += readRaw();
+    }
+    return (int32_t)(sum / samples);
+}
+
+bool NAU7802_Module::setGain(NAU7802_Gain gain) {
+    _currentGain = gain;
+    
+    // Clear gain bits (0-2) and set new gain
+    uint8_t value = readRegister(NAU7802_CTRL1);
+    value &= 0b11111000; // Clear bits 0-2
+    value |= (gain & 0x07); // Set gain bits
+    
+    bool result = writeRegister(NAU7802_CTRL1, value);
+    if (result) {
+        delay(50); // Allow gain change to stabilize
+    }
+    return result;
+}
+
+bool NAU7802_Module::setSampleRate(NAU7802_SampleRate sps) {
+    // Clear SPS bits (4-6) and set new rate
+    uint8_t value = readRegister(NAU7802_CTRL2);
+    value &= 0b10001111; // Clear bits 4-6
+    value |= (sps << 4); // Set SPS bits
+    
+    return writeRegister(NAU7802_CTRL2, value);
+}
+
+bool NAU7802_Module::calibrateAFE() {
+    // Begin calibration
+    bool result = setBit(NAU7802_CTRL2, 2); // CALS bit
+    if (!result) {
+        return false;
+    }
+    
+    // Wait for calibration to complete (check CAL_ERR bit)
+    delay(500); // Calibration typically takes ~350ms
+    
+    // Check if calibration succeeded
+    if (getBit(NAU7802_CTRL2, 3)) { // CAL_ERR bit
+        Serial.println("NAU7802: Calibration error!");
+        return false;
+    }
+    
+    return true;
+}
+
+float NAU7802_Module::calculateVoltage(int32_t rawValue, float referenceVoltage) {
+    // NAU7802 is 24-bit ADC with full scale range of ±2^23
+    float fullScale = 8388608.0; // 2^23
+    
+    // Calculate voltage considering current gain
+    int gainValue = 1 << _currentGain; // 2^gain
+    
+    return (rawValue / fullScale) * (referenceVoltage / gainValue);
+}
+
+bool NAU7802_Module::tare(uint8_t samples) {
+    if (!_initialized) {
+        Serial.println("NAU7802: Not initialized!");
+        return false;
+    }
+    
+    Serial.print("NAU7802: Taring with ");
+    Serial.print(samples);
+    Serial.println(" samples...");
+    
+    _zeroOffset = readAverage(samples);
+    
+    Serial.print("NAU7802: Zero offset set to ");
+    Serial.println(_zeroOffset);
+    
+    return true;
+}
+
+int32_t NAU7802_Module::getReading() {
+    return readRaw() - _zeroOffset;
+}
+
+float NAU7802_Module::calculateStrain(int32_t rawValue, float gaugeExcitation, float gaugeFactor) {
+    // Calculate output voltage from ADC reading
+    float vOut = calculateVoltage(rawValue);
+    
+    // Calculate strain using Wheatstone bridge equation (quarter bridge)
+    // ε = (Vout / Vex) / (GF * (1/4))
+    // Simplified: ε = 4 * Vout / (Vex * GF)
+    
+    float strain = 4.0 * vOut / (gaugeExcitation * gaugeFactor);
+    
+    return strain; // Returns strain as a decimal (e.g., 0.001 = 1000 microstrain)
+}
+
+// Private helper methods
+bool NAU7802_Module::writeRegister(uint8_t reg, uint8_t value) {
+    _wire->beginTransmission(_address);
+    _wire->write(reg);
+    _wire->write(value);
+    return (_wire->endTransmission() == 0);
+}
+
+uint8_t NAU7802_Module::readRegister(uint8_t reg) {
+    _wire->beginTransmission(_address);
+    _wire->write(reg);
+    _wire->endTransmission(false); // Send restart
+    
+    _wire->requestFrom(_address, (uint8_t)1);
+    if (_wire->available()) {
+        return _wire->read();
+    }
+    return 0;
+}
+
+bool NAU7802_Module::setBit(uint8_t reg, uint8_t bit) {
+    uint8_t value = readRegister(reg);
+    value |= (1 << bit);
+    return writeRegister(reg, value);
+}
+
+bool NAU7802_Module::clearBit(uint8_t reg, uint8_t bit) {
+    uint8_t value = readRegister(reg);
+    value &= ~(1 << bit);
+    return writeRegister(reg, value);
+}
+
+bool NAU7802_Module::getBit(uint8_t reg, uint8_t bit) {
+    uint8_t value = readRegister(reg);
+    return (value & (1 << bit)) != 0;
+}

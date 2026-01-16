@@ -17,6 +17,7 @@ TwoWire I2C_Sensors = TwoWire(1);                           // Secondary I2C bus
 OLEDDisplay_Module oledDisplay;                             // OLED display instance
 SHT45_Module sht45(&I2C_Sensors, SHT45_I2C_ADDRESS);        // SHT45 sensor instance
 LIS3DH_Module lis3dh(&I2C_Sensors, LIS3DH_I2C_ADDRESS);     // LIS3DH accelerometer instance
+NAU7802_Module nau7802(&I2C_Sensors, NAU7802_I2C_ADDRESS);  // NAU7802 ADC for strain gauges
 
 // SD Card - Initialize SPI on HSPI bus
 SPIClass spiSD(HSPI);
@@ -438,6 +439,19 @@ void setup() {
     Serial.println("LIS3DH: FAILED");
   }
 
+  // Initialize NAU7802 ADC for Strain Gauges
+  Serial.println("\nInitializing NAU7802 ADC...");
+  if (nau7802.begin()) {
+    Serial.println("NAU7802: OK");
+    
+    // Tare the ADC (zero it)
+    Serial.println("Taring strain gauge ADC...");
+    nau7802.tare(20);
+    Serial.println("NAU7802: Ready for measurements");
+  } else {
+    Serial.println("NAU7802: FAILED");
+  }
+
   // Initialize SD Card
   Serial.println();
   spiSD.begin(SDCARD_SCK, SDCARD_MISO, SDCARD_MOSI, SDCARD_CS);
@@ -457,6 +471,8 @@ void setup() {
   Serial.println("  d - Display all stored events");
   Serial.println("  c - Clear all events from SD card");
   Serial.println("  o - Offload data (playback events, resync time, clear SD)");
+  Serial.println("  g - Read single strain gauge sample");
+  Serial.println("  z - Tare/zero the strain gauge");
   Serial.println("-----------------------\n");
   delay(2000);
 }
@@ -492,6 +508,39 @@ void processSerialCommand(char command) {
     case 'd':
     case 'D':
       playbackEvents();
+      break;
+      
+    case 'g':
+    case 'G':
+      {
+        Serial.println("\n=== STRAIN GAUGE READING ===");
+        int32_t raw = nau7802.readRaw();
+        int32_t reading = nau7802.getReading(); // With offset removed
+        float voltage = nau7802.calculateVoltage(raw);
+        
+        Serial.printf("Raw ADC Value: %ld\n", raw);
+        Serial.printf("Zeroed Reading: %ld\n", reading);
+        Serial.printf("Output Voltage: %.6f V (%.3f mV)\n", voltage, voltage * 1000.0);
+        
+        // Example strain calculation (assuming 3.3V excitation and GF=2.0)
+        float strain = nau7802.calculateStrain(reading, 3.3, 2.0);
+        float microstrain = strain * 1000000.0; // Convert to microstrain
+        Serial.printf("Estimated Strain: %.2f με (microstrain)\n", microstrain);
+        Serial.println("==============================\n");
+      }
+      break;
+      
+    case 'z':
+    case 'Z':
+      {
+        Serial.println("\n=== TARING STRAIN GAUGE ===");
+        if (nau7802.tare(20)) {
+          Serial.println("Strain gauge zeroed successfully!");
+        } else {
+          Serial.println("Failed to zero strain gauge!");
+        }
+        Serial.println("===========================\n");
+      }
       break;
       
     default:

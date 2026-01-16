@@ -29,6 +29,7 @@
 #include "SHT45_Module.h"
 #include "LIS3DH_Module.h"
 #include "SDCard_Module.h"
+#include "NAU7802_Module.h"
 
 
 /**
@@ -43,6 +44,7 @@
 // Sensor I2C Addresses
 #define SHT45_I2C_ADDRESS   0x44    // SHT45 temperature/humidity sensor address
 #define LIS3DH_I2C_ADDRESS  0x18    // LIS3DH accelerometer address
+#define NAU7802_I2C_ADDRESS 0x2A    // NAU7802 ADC address (default)
 
 // SD Card SPI Pin Definitions
 #define SDCARD_MOSI         34      // SD card MOSI pin (Brown wire)
@@ -77,6 +79,7 @@ extern OLEDDisplay_Module oledDisplay;   // OLED display module
 extern SHT45_Module sht45;               // SHT45 temperature/humidity sensor
 extern LIS3DH_Module lis3dh;             // LIS3DH accelerometer
 extern SDCard_Module sdCard;             // SD card module
+extern NAU7802_Module nau7802;           // NAU7802 ADC for strain gauges
 
 
 /**
