@@ -1,0 +1,31 @@
+Why it works:
+
+The initial offset is small (~4% of bridge voltage)
+The NAU7802 has calibration/tare functions to zero out this initial offset
+Once calibrated, the bridge will respond normally to strain
+The strain gauge sensitivity remains unchanged
+You'll just need to run a calibration routine in software (the Adafruit NAU7802 library has built-in 
+calibrateAFE() function)
+
+        a (TOP - DC+/E+)
+         |
+    +----+----+
+    |         |
+   R1        R3
+    |         |
+    b         c  ← MIDDLE NODES (Measurement points)
+    |         |
+   R2        Rx
+    |         |
+    +----+----+
+         |
+        d (BOTTOM - DC-/E-)
+
+Practical Considerations:
+Resistor Value	Current Draw	Signal Level	Verdict
+330Ω	~5.0 mA	Good	✅ Perfectly fine
+350Ω (nominal)	~4.7 mA	Good	✅ Ideal
+365Ω (yours)	~4.5 mA	Good	✅ Great
+470Ω	~3.5 mA	Slightly lower	✅ OK
+1kΩ	~1.6 mA	Lower SNR	⚠️ Marginal
+100Ω	~16.5 mA	Too high	❌ Too much power
