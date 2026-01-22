@@ -10,7 +10,7 @@
 #include "NAU7802_Module.h"
 
 NAU7802_Module::NAU7802_Module(TwoWire* wire, uint8_t address) 
-    : _wire(wire), _address(address), _initialized(false), _zeroOffset(0), _currentGain(NAU7802_GAIN_128) {
+    : _wire(wire), _address(address), _initialized(false), _zeroOffset(0), _currentGain(NAU7802_GAIN_32) {
 }
 
 bool NAU7802_Module::begin() {
@@ -76,14 +76,15 @@ bool NAU7802_Module::begin() {
     
     delay(100); // Allow LDO to stabilize
     
-    // Set default gain (128x for strain gauges)
-    if (!setGain(NAU7802_GAIN_128)) {
+    // Set default gain (32x for strain gauges with imbalanced bridge)
+    // Note: 128x causes saturation with 365Ω resistors vs 350Ω gauge
+    if (!setGain(NAU7802_GAIN_32)) {
         Serial.println("NAU7802: Failed to set gain!");
         return false;
     }
     
-    // Set default sample rate (80 SPS - good balance of speed and noise)
-    if (!setSampleRate(NAU7802_SPS_80)) {
+    // Set sample rate to 10 SPS for better noise rejection (slower but cleaner)
+    if (!setSampleRate(NAU7802_SPS_10)) {
         Serial.println("NAU7802: Failed to set sample rate!");
         return false;
     }
@@ -137,6 +138,24 @@ int32_t NAU7802_Module::readRaw() {
     
     if (timeout == 0) {
         Serial.println("NAU7802: Data timeout!");
+        
+        // Diagnostic info
+        uint8_t puCtrl = readRegister(NAU7802_PU_CTRL);
+        Serial.printf("  PU_CTRL = 0x%02X", puCtrl);
+        Serial.printf(" (CS=%d, CR=%d, PUA=%d, PUD=%d)\n",
+                     (puCtrl >> 4) & 1, (puCtrl >> 5) & 1, 
+                     (puCtrl >> 2) & 1, (puCtrl >> 1) & 1);
+        
+        // Try to restart conversions
+        Serial.println("  Attempting to restart conversions...");
+        if (setBit(NAU7802_PU_CTRL, 4)) {
+            delay(100);
+            if (isDataReady()) {
+                Serial.println("  ✓ Conversions restarted!");
+            } else {
+                Serial.println("  ✗ Still no data ready");
+            }
+        }
         return 0;
     }
     
@@ -162,6 +181,55 @@ int32_t NAU7802_Module::readAverage(uint8_t samples) {
         sum += readRaw();
     }
     return (int32_t)(sum / samples);
+}
+
+int32_t NAU7802_Module::readMedian(uint8_t samples) {
+    // Read multiple samples
+    if (samples < 3) samples = 3;
+    if (samples > 15) samples = 15;
+    
+    int32_t readings[15];
+    for (uint8_t i = 0; i < samples; i++) {
+        readings[i] = readRaw();
+    }
+    
+    // Simple bubble sort
+    for (uint8_t i = 0; i < samples - 1; i++) {
+        for (uint8_t j = 0; j < samples - i - 1; j++) {
+            if (readings[j] > readings[j + 1]) {
+                int32_t temp = readings[j];
+                readings[j] = readings[j + 1];
+                readings[j + 1] = temp;
+            }
+        }
+    }
+    
+    // Return median value
+    return readings[samples / 2];
+}
+
+int32_t NAU7802_Module::readFiltered(uint8_t samples) {
+    // Read samples and reject outliers, then average
+    if (samples < 5) samples = 5;
+    if (samples > 20) samples = 20;
+    
+    int32_t readings[20];
+    int64_t sum = 0;
+    int32_t minVal = 2147483647;
+    int32_t maxVal = -2147483648;
+    
+    // Collect samples
+    for (uint8_t i = 0; i < samples; i++) {
+        readings[i] = readRaw();
+        sum += readings[i];
+        if (readings[i] < minVal) minVal = readings[i];
+        if (readings[i] > maxVal) maxVal = readings[i];
+    }
+    
+    // Remove min and max (outliers), average the rest
+    sum -= minVal;
+    sum -= maxVal;
+    return (int32_t)(sum / (samples - 2));
 }
 
 bool NAU7802_Module::setGain(NAU7802_Gain gain) {
@@ -250,6 +318,42 @@ float NAU7802_Module::calculateStrain(int32_t rawValue, float gaugeExcitation, f
     float strain = 4.0 * vOut / (gaugeExcitation * gaugeFactor);
     
     return strain; // Returns strain as a decimal (e.g., 0.001 = 1000 microstrain)
+}
+
+bool NAU7802_Module::restartConversions() {
+    Serial.println("NAU7802: Checking conversion status...");
+    
+    uint8_t puCtrl = readRegister(NAU7802_PU_CTRL);
+    Serial.printf("  PU_CTRL = 0x%02X\n", puCtrl);
+    
+    bool cs = (puCtrl >> 4) & 1;  // Cycle Start bit
+    bool cr = (puCtrl >> 5) & 1;  // Conversion Ready bit
+    bool pua = (puCtrl >> 2) & 1; // Power Up Analog
+    bool pud = (puCtrl >> 1) & 1; // Power Up Digital
+    
+    Serial.printf("  CS (Cycle Start): %d\n", cs);
+    Serial.printf("  CR (Conv Ready):  %d\n", cr);
+    Serial.printf("  PUA (Analog Pwr): %d\n", pua);
+    Serial.printf("  PUD (Digital Pwr): %d\n", pud);
+    
+    // If conversions aren't running, restart them
+    if (!cs) {
+        Serial.println("  CS bit not set - starting conversions...");
+        if (!setBit(NAU7802_PU_CTRL, 4)) {
+            Serial.println("  Failed to set CS bit!");
+            return false;
+        }
+        delay(100);
+    }
+    
+    // Check if data is ready now
+    if (isDataReady()) {
+        Serial.println("  ✓ Data ready!");
+        return true;
+    } else {
+        Serial.println("  ✗ Still no data ready");
+        return false;
+    }
 }
 
 // Private helper methods

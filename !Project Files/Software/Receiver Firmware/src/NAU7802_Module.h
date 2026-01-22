@@ -65,6 +65,12 @@ public:
     // Read average of multiple samples
     int32_t readAverage(uint8_t samples = 10);
     
+    // Read with median filter (removes outliers)
+    int32_t readMedian(uint8_t samples = 5);
+    
+    // Read with moving average filter
+    int32_t readFiltered(uint8_t samples = 10);
+    
     // Set gain (1, 2, 4, 8, 16, 32, 64, 128)
     bool setGain(NAU7802_Gain gain);
     
@@ -85,6 +91,9 @@ public:
     
     // Convert raw value to strain (requires calibration)
     float calculateStrain(int32_t rawValue, float gaugeExcitation, float gaugeFactor = 2.0);
+    
+    // Check and restart conversions if needed
+    bool restartConversions();
     
 private:
     TwoWire* _wire;
