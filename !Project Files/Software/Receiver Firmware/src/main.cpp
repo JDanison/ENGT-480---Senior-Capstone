@@ -17,6 +17,7 @@ TwoWire I2C_Sensors = TwoWire(1);                           // Secondary I2C bus
 OLEDDisplay_Module oledDisplay;                             // OLED display instance
 SHT45_Module sht45(&I2C_Sensors, SHT45_I2C_ADDRESS);        // SHT45 sensor instance
 LIS3DH_Module lis3dh(&I2C_Sensors, LIS3DH_I2C_ADDRESS);     // LIS3DH accelerometer instance
+NAU7802_Module nau7802(&I2C_Sensors, NAU7802_I2C_ADDRESS);  // NAU7802 ADC for strain gauges
 
 // SD Card - Initialize SPI on HSPI bus
 SPIClass spiSD(HSPI);
@@ -438,6 +439,19 @@ void setup() {
     Serial.println("LIS3DH: FAILED");
   }
 
+  // Initialize NAU7802 ADC for Strain Gauges
+  Serial.println("\nInitializing NAU7802 ADC...");
+  if (nau7802.begin()) {
+    Serial.println("NAU7802: OK");
+    
+    // Tare the ADC (zero it)
+    Serial.println("Taring strain gauge ADC...");
+    nau7802.tare(20);
+    Serial.println("NAU7802: Ready for measurements");
+  } else {
+    Serial.println("NAU7802: FAILED");
+  }
+
   // Initialize SD Card
   Serial.println();
   spiSD.begin(SDCARD_SCK, SDCARD_MISO, SDCARD_MOSI, SDCARD_CS);
@@ -457,6 +471,12 @@ void setup() {
   Serial.println("  d - Display all stored events");
   Serial.println("  c - Clear all events from SD card");
   Serial.println("  o - Offload data (playback events, resync time, clear SD)");
+  Serial.println("  g - Read single strain gauge sample");
+  Serial.println("  z - Tare/zero the strain gauge");
+  Serial.println("  r - Restart NAU7802 conversions (if timeouts occur)");
+  Serial.println("  m - Monitor strain continuously (press any key to stop)");
+  Serial.println("  b - Bridge balance and sensitivity test");
+  Serial.println("  1-4 - Test with gain 1x, 2x, 4x, 8x (temporary)");
   Serial.println("-----------------------\n");
   delay(2000);
 }
@@ -492,6 +512,238 @@ void processSerialCommand(char command) {
     case 'd':
     case 'D':
       playbackEvents();
+      break;
+      
+    case 'g':
+    case 'G':
+      {
+        Serial.println("\n=== STRAIN GAUGE READING ===");
+        
+        // Take multiple readings with different methods
+        Serial.println("Raw single sample:");
+        int32_t raw = nau7802.readRaw();
+        Serial.printf("  Single:    %8ld\n", raw);
+        
+        Serial.println("\nFiltered readings (10 samples each):");
+        int32_t avg = nau7802.readAverage(10);
+        int32_t median = nau7802.readMedian(9);
+        int32_t filtered = nau7802.readFiltered(10);
+        
+        Serial.printf("  Average:   %8ld\n", avg);
+        Serial.printf("  Median:    %8ld\n", median);
+        Serial.printf("  Filtered:  %8ld (outliers removed)\n", filtered);
+        
+        // Show zeroed readings
+        int32_t reading = nau7802.getReading(); // Uses single raw read
+        float voltage = nau7802.calculateVoltage(filtered);
+        
+        Serial.println("\nZeroed values:");
+        Serial.printf("  Raw zeroed:      %8ld\n", reading);
+        Serial.printf("  Filtered zeroed: %8ld\n", filtered - raw + reading);
+        Serial.printf("  Offset applied:  %8ld\n", raw - reading);
+        Serial.printf("  Output voltage:  %.6f V (%.3f mV)\n", voltage, voltage * 1000.0);
+        
+        // Check if offset looks suspicious
+        if (abs(reading) > abs(raw)) {
+          Serial.println("⚠️  WARNING: Zeroed reading larger than raw!");
+          Serial.println("⚠️  You may need to tare the sensor (press 'z')");
+        }
+        
+        // Example strain calculation (assuming 3.3V excitation and GF=2.0)
+        float strain = nau7802.calculateStrain(filtered - raw + reading, 3.3, 2.0);
+        float microstrain = strain * 1000000.0; // Convert to microstrain
+        Serial.printf("\nEstimated Strain: %.2f με (microstrain)\n", microstrain);
+        
+        // Interpret the strain value
+        if (abs(microstrain) < 100) {
+          Serial.println("✅ Strain looks good (near zero, no load)");
+        } else if (abs(microstrain) < 500) {
+          Serial.println("⚠️  Moderate strain detected");
+        } else {
+          Serial.println("❌ High strain! Check tare or applied load");
+        }
+        
+        Serial.println("==============================\n");
+      }
+      break;
+      
+    case 'z':
+    case 'Z':
+      {
+        Serial.println("\n=== TARING STRAIN GAUGE ===");
+        if (nau7802.tare(20)) {
+          Serial.println("Strain gauge zeroed successfully!");
+        } else {
+          Serial.println("Failed to zero strain gauge!");
+        }
+        Serial.println("===========================\n");
+      }
+      break;
+      
+    case 'r':
+    case 'R':
+      {
+        Serial.println("\n=== RESTARTING NAU7802 ===");
+        nau7802.restartConversions();
+        Serial.println("===========================\n");
+      }
+      break;
+      
+    case '1':
+    case '2':
+    case '3':
+    case '4':
+      {
+        // Test different gain settings
+        NAU7802_Gain testGain;
+        int gainValue = 1;
+        
+        switch(command) {
+          case '1': testGain = NAU7802_GAIN_1; gainValue = 1; break;
+          case '2': testGain = NAU7802_GAIN_2; gainValue = 2; break;
+          case '3': testGain = NAU7802_GAIN_4; gainValue = 4; break;
+          case '4': testGain = NAU7802_GAIN_8; gainValue = 8; break;
+        }
+        
+        Serial.printf("\n=== TESTING GAIN %dx ===\n", gainValue);
+        nau7802.setGain(testGain);
+        delay(100);
+        
+        Serial.println("Taking 5 samples:");
+        for (int i = 0; i < 5; i++) {
+          int32_t raw = nau7802.readRaw();
+          float percent = (raw / 8388608.0) * 100.0;
+          Serial.printf("  Sample %d: %8ld (%.2f%% FS)", i+1, raw, percent);
+          if (raw >= 8388600 || raw <= -8388600) {
+            Serial.print(" ❌ SATURATED!");
+          }
+          Serial.println();
+          delay(100);
+        }
+        
+        // Restore gain to 128x
+        nau7802.setGain(NAU7802_GAIN_128);
+        Serial.println("\nGain restored to 128x");
+        Serial.println("===========================\n");
+      }
+      break;
+      
+    case 'm':
+    case 'M':
+      {
+        Serial.println("\n=== CONTINUOUS STRAIN MONITORING ===");
+        Serial.println("Monitoring strain in real-time...");
+        Serial.println("Apply load to the strain gauge now!");
+        Serial.println("Press any key to stop.\n");
+        Serial.println("Time(s), Raw, Filtered, Zeroed, Strain(με)");
+        Serial.println("-------------------------------------------------------");
+        
+        unsigned long startTime = millis();
+        int sampleCount = 0;
+        
+        while (!Serial.available()) {
+          int32_t raw = nau7802.readRaw();
+          int32_t filtered = nau7802.readFiltered(10); // 10 samples, outliers removed
+          int32_t zeroed = filtered - raw + nau7802.getReading();
+          float strain = nau7802.calculateStrain(zeroed, 3.3, 2.0);
+          float microstrain = strain * 1000000.0;
+          
+          float elapsedTime = (millis() - startTime) / 1000.0;
+          
+          Serial.printf("%.2f, %8ld, %8ld, %8ld, %9.2f", 
+                       elapsedTime, raw, filtered, zeroed, microstrain);
+          
+          // Add visual indicator for high strain
+          if (abs(microstrain) > 100) {
+            Serial.print(" ← STRAIN DETECTED!");
+          }
+          Serial.println();
+          
+          sampleCount++;
+          delay(200); // 5 samples per second (slower for filtering)
+        }
+        
+        // Clear the serial buffer
+        while (Serial.available()) Serial.read();
+        
+        Serial.println("-------------------------------------------------------");
+        Serial.printf("Monitoring stopped. Collected %d samples.\n", sampleCount);
+        Serial.println("===========================\n");
+      }
+      break;
+      
+    case 'b':
+    case 'B':
+      {
+        Serial.println("\n=== BRIDGE BALANCE TEST ===");
+        Serial.println("Testing Wheatstone bridge configuration...\n");
+        
+        // Take multiple readings
+        Serial.println("Taking 10 raw ADC samples:");
+        int64_t sum = 0;
+        int32_t minVal = 2147483647;
+        int32_t maxVal = -2147483648;
+        
+        for (int i = 0; i < 10; i++) {
+          int32_t raw = nau7802.readRaw();
+          Serial.printf("  Sample %d: %8ld\n", i+1, raw);
+          sum += raw;
+          if (raw < minVal) minVal = raw;
+          if (raw > maxVal) maxVal = raw;
+          delay(50);
+        }
+        
+        int32_t avg = sum / 10;
+        int32_t range = maxVal - minVal;
+        float percentFS = (abs(avg) / 8388608.0) * 100.0;
+        
+        Serial.println("\n--- Analysis ---");
+        Serial.printf("Average:    %ld\n", avg);
+        Serial.printf("Min:        %ld\n", minVal);
+        Serial.printf("Max:        %ld\n", maxVal);
+        Serial.printf("Range:      %ld (noise)\n", range);
+        Serial.printf("% Full Scale: %.2f%%\n", percentFS);
+        
+        Serial.println("\n--- Bridge Status ---");
+        if (abs(avg) < 100000) {
+          Serial.println("✓ Bridge is well balanced!");
+        } else if (abs(avg) < 1000000) {
+          Serial.println("⚠ Bridge has moderate offset (normal)");
+        } else if (abs(avg) < 4000000) {
+          Serial.println("⚠ Bridge has large offset (acceptable)");
+        } else {
+          Serial.println("❌ Bridge severely unbalanced or gain too high!");
+        }
+        
+        if (range < 1000) {
+          Serial.println("✓ Low noise - good signal quality");
+        } else if (range < 10000) {
+          Serial.println("⚠ Moderate noise");
+        } else {
+          Serial.println("❌ High noise - check connections!");
+        }
+        
+        Serial.println("\n--- Sensitivity Test ---");
+        Serial.println("Now apply a small load and watch for changes...");
+        Serial.println("Monitoring for 5 seconds:");
+        
+        int32_t baseline = nau7802.readAverage(10);
+        Serial.printf("Baseline (no load): %ld\n\n", baseline);
+        
+        for (int i = 0; i < 50; i++) {
+          int32_t current = nau7802.readRaw();
+          int32_t delta = current - baseline;
+          Serial.printf("  t=%.1fs: %8ld (Δ=%+8ld)", i * 0.1, current, delta);
+          
+          if (abs(delta) > 1000) {
+            Serial.print(" ← CHANGE DETECTED!");
+          }
+          Serial.println();
+          delay(100);
+        }
+        
+        Serial.println("\n===========================\n");
+      }
       break;
       
     default:
