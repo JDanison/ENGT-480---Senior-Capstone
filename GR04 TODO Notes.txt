@@ -1,0 +1,4 @@
+Put Some Sample Data In
+	- A couple event packets
+	
+Don't need to design the PCB, but talk about holding points, prcoess of what I am planning on doing, and a timeline to go along with it.
