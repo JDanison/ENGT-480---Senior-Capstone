@@ -1,6 +1,6 @@
 /*
   Filename: main.h
-  Heletec Receiver
+  Heltec Receiver
   Author: John Danison
 
   Last Updated: 12/16/2025

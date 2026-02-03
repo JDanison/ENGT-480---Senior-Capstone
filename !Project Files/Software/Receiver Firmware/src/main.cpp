@@ -1,6 +1,6 @@
 /* 
   Filename: main.cpp
-  Heletec Receiver
+  Heltec Receiver
   Author: John Danison
   Date Created: 12/6/2025
 
