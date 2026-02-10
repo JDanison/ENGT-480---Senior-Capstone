@@ -172,10 +172,32 @@ int32_t NAU7802_Module::readRaw() {
         value |= 0xFF000000;
     }
     
+    // CRITICAL: Wait for CR bit to clear after reading data registers
+    // This ensures the next call waits for a NEW conversion, not stale data
+    // The CR bit should auto-clear after reading, but verify it happened
+    delay(2); // Brief delay to allow CR bit to update
+    
+    // Now wait for CR to go LOW (new conversion started), then HIGH again (new data ready)
+    // This ensures subsequent readRaw() calls get fresh data
+    timeout = 150; // 150ms should cover one full 10 SPS cycle (100ms) plus margin
+    bool crWentLow = false;
+    while (timeout > 0) {
+        if (!isDataReady()) {
+            crWentLow = true; // New conversion has started
+            break;
+        }
+        delay(1);
+        timeout--;
+    }
+    
+    // If CR never went low, it means conversions might be stalled or too fast
+    // This is expected if sample rate is very high (320 SPS) or if called infrequently
+    
     return value;
 }
 
 int32_t NAU7802_Module::readAverage(uint8_t samples) {
+    if (samples > 50) samples = 50; // Limit max samples
     int64_t sum = 0;
     for (uint8_t i = 0; i < samples; i++) {
         sum += readRaw();
@@ -186,9 +208,9 @@ int32_t NAU7802_Module::readAverage(uint8_t samples) {
 int32_t NAU7802_Module::readMedian(uint8_t samples) {
     // Read multiple samples
     if (samples < 3) samples = 3;
-    if (samples > 15) samples = 15;
+    if (samples > 25) samples = 25;
     
-    int32_t readings[15];
+    int32_t readings[25];
     for (uint8_t i = 0; i < samples; i++) {
         readings[i] = readRaw();
     }
@@ -211,9 +233,9 @@ int32_t NAU7802_Module::readMedian(uint8_t samples) {
 int32_t NAU7802_Module::readFiltered(uint8_t samples) {
     // Read samples and reject outliers, then average
     if (samples < 5) samples = 5;
-    if (samples > 20) samples = 20;
+    if (samples > 50) samples = 50;
     
-    int32_t readings[20];
+    int32_t readings[50];
     int64_t sum = 0;
     int32_t minVal = 2147483647;
     int32_t maxVal = -2147483648;
