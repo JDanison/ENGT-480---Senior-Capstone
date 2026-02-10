@@ -83,8 +83,8 @@ bool NAU7802_Module::begin() {
         return false;
     }
     
-    // Set sample rate to 10 SPS for better noise rejection (slower but cleaner)
-    if (!setSampleRate(NAU7802_SPS_10)) {
+    // Set sample rate to 20 SPS for better noise rejection (slower but cleaner)
+    if (!setSampleRate(NAU7802_SPS_20)) {
         Serial.println("NAU7802: Failed to set sample rate!");
         return false;
     }
