@@ -293,9 +293,10 @@ bool NAU7802_Module::tare(uint8_t samples) {
     
     Serial.print("NAU7802: Taring with ");
     Serial.print(samples);
-    Serial.println(" samples...");
+    Serial.println(" samples (outliers removed)...");
     
-    _zeroOffset = readAverage(samples);
+    // Use readFiltered instead of readAverage to reject outlier noise spikes
+    _zeroOffset = readFiltered(samples);
     
     Serial.print("NAU7802: Zero offset set to ");
     Serial.println(_zeroOffset);

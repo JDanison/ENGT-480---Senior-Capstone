@@ -445,8 +445,8 @@ void setup() {
     Serial.println("NAU7802: OK");
     
     // Tare the ADC (zero it)
-    Serial.println("Taring strain gauge ADC...");
-    nau7802.tare(20);
+    Serial.println("Taring strain gauge ADC");
+    nau7802.tare(200);
     Serial.println("NAU7802: Ready for measurements");
   } else {
     Serial.println("NAU7802: FAILED");
@@ -571,7 +571,8 @@ void processSerialCommand(char command) {
     case 'Z':
       {
         Serial.println("\n=== TARING STRAIN GAUGE ===");
-        if (nau7802.tare(20)) {
+        Serial.println("Taking 200 samples for tare...");
+        if (nau7802.tare(200)) {
           Serial.println("Strain gauge zeroed successfully!");
         } else {
           Serial.println("Failed to zero strain gauge!");
