@@ -445,8 +445,8 @@ void setup() {
     Serial.println("NAU7802: OK");
     
     // Tare the ADC (zero it)
-    Serial.println("Taring strain gauge ADC...");
-    nau7802.tare(20);
+    Serial.println("Taring strain gauge ADC");
+    nau7802.tare(200);
     Serial.println("NAU7802: Ready for measurements");
   } else {
     Serial.println("NAU7802: FAILED");
@@ -571,7 +571,8 @@ void processSerialCommand(char command) {
     case 'Z':
       {
         Serial.println("\n=== TARING STRAIN GAUGE ===");
-        if (nau7802.tare(20)) {
+        Serial.println("Taking 200 samples for tare...");
+        if (nau7802.tare(200)) {
           Serial.println("Strain gauge zeroed successfully!");
         } else {
           Serial.println("Failed to zero strain gauge!");
@@ -635,38 +636,40 @@ void processSerialCommand(char command) {
         Serial.println("Monitoring strain in real-time...");
         Serial.println("Apply load to the strain gauge now!");
         Serial.println("Press any key to stop.\n");
-        Serial.println("Time(s), Raw, Filtered, Zeroed, Strain(με)");
-        Serial.println("-------------------------------------------------------");
+        Serial.println("Time(s), Raw, Avg(20), Filtered(20), Zeroed, Strain(με)");
+        Serial.println("-----------------------------------------------------------------------");
         
         unsigned long startTime = millis();
         int sampleCount = 0;
         
         while (!Serial.available()) {
+          // Use heavy averaging to reduce noise: 20 samples with outlier rejection
           int32_t raw = nau7802.readRaw();
-          int32_t filtered = nau7802.readFiltered(10); // 10 samples, outliers removed
-          int32_t zeroed = filtered - raw + nau7802.getReading();
+          int32_t avg = nau7802.readAverage(20);      // Simple average
+          int32_t filtered = nau7802.readFiltered(20); // Outlier rejection
+          int32_t zeroed = filtered - nau7802.getZeroOffset(); // Apply tare offset
           float strain = nau7802.calculateStrain(zeroed, 3.3, 2.0);
           float microstrain = strain * 1000000.0;
           
           float elapsedTime = (millis() - startTime) / 1000.0;
           
-          Serial.printf("%.2f, %8ld, %8ld, %8ld, %9.2f", 
-                       elapsedTime, raw, filtered, zeroed, microstrain);
+          Serial.printf("%.2f, %8ld, %8ld, %8ld, %8ld, %9.2f", 
+                       elapsedTime, raw, avg, filtered, zeroed, microstrain);
           
           // Add visual indicator for high strain
-          if (abs(microstrain) > 100) {
+          if (abs(microstrain) > 50) {
             Serial.print(" ← STRAIN DETECTED!");
           }
           Serial.println();
           
           sampleCount++;
-          delay(200); // 5 samples per second (slower for filtering)
+          delay(100); // Small delay between readings
         }
         
         // Clear the serial buffer
         while (Serial.available()) Serial.read();
         
-        Serial.println("-------------------------------------------------------");
+        Serial.println("-----------------------------------------------------------------------");
         Serial.printf("Monitoring stopped. Collected %d samples.\n", sampleCount);
         Serial.println("===========================\n");
       }

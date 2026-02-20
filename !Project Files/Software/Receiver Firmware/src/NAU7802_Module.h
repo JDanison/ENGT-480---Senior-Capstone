@@ -89,6 +89,9 @@ public:
     // Get reading with offset removed
     int32_t getReading();
     
+    // Get the current zero offset value
+    int32_t getZeroOffset() { return _zeroOffset; }
+    
     // Convert raw value to strain (requires calibration)
     float calculateStrain(int32_t rawValue, float gaugeExcitation, float gaugeFactor = 2.0);
     
