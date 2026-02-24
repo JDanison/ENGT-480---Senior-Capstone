@@ -633,16 +633,24 @@ void processSerialCommand(char command) {
     case 'M':
       {
         Serial.println("\n=== CONTINUOUS STRAIN MONITORING ===");
+        Serial.println("[M_SESSION_START]");
         Serial.println("Monitoring strain in real-time...");
         Serial.println("Apply load to the strain gauge now!");
         Serial.println("Press any key to stop.\n");
-        Serial.println("Time(s), Raw, Avg(20), Filtered(20), Zeroed, Strain(με)");
-        Serial.println("-----------------------------------------------------------------------");
+        Serial.println("Time(s), SampleMs, Raw, Avg(20), Filtered(20), Zeroed, Strain(με)");
+        Serial.println("---------------------------------------------------------------------------------");
+
+        // Clear any pending serial bytes (e.g., newline after command input)
+        while (Serial.available()) {
+          Serial.read();
+        }
         
         unsigned long startTime = millis();
         int sampleCount = 0;
         
         while (!Serial.available()) {
+          unsigned long sampleStart = millis();
+
           // Use heavy averaging to reduce noise: 20 samples with outlier rejection
           int32_t raw = nau7802.readRaw();
           int32_t avg = nau7802.readAverage(20);      // Simple average
@@ -652,9 +660,10 @@ void processSerialCommand(char command) {
           float microstrain = strain * 1000000.0;
           
           float elapsedTime = (millis() - startTime) / 1000.0;
+          unsigned long sampleMs = millis() - sampleStart;
           
-          Serial.printf("%.2f, %8ld, %8ld, %8ld, %8ld, %9.2f", 
-                       elapsedTime, raw, avg, filtered, zeroed, microstrain);
+          Serial.printf("%.2f, %8lu, %8ld, %8ld, %8ld, %8ld, %9.2f", 
+                       elapsedTime, sampleMs, raw, avg, filtered, zeroed, microstrain);
           
           // Add visual indicator for high strain
           if (abs(microstrain) > 50) {
@@ -669,8 +678,9 @@ void processSerialCommand(char command) {
         // Clear the serial buffer
         while (Serial.available()) Serial.read();
         
-        Serial.println("-----------------------------------------------------------------------");
+        Serial.println("---------------------------------------------------------------------------------");
         Serial.printf("Monitoring stopped. Collected %d samples.\n", sampleCount);
+        Serial.println("[M_SESSION_END]");
         Serial.println("===========================\n");
       }
       break;
