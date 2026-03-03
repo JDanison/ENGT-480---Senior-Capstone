@@ -58,7 +58,8 @@
 // Timing Configuration
 #define SENSOR_READ_INTERVAL 100    // Sensor reading interval in milliseconds (fast for demo)
 #define ACCEL_THRESHOLD      2.0    // Accelerometer threshold in g's
-#define EVENT_SAMPLE_COUNT   20     // Number of accelerometer samples to capture per event
+#define EVENT_CAPTURE_DURATION_MS 2000 // Event capture window in milliseconds
+#define EVENT_MAX_SAMPLES      80      // Safety cap for paired accel+strain samples in one event
 
 // WiFi Configuration (for time sync)
 // NOTE: Update these with your WiFi credentials before deploying
