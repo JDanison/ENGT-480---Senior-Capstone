@@ -24,9 +24,25 @@
 //#include <chrono>       // Advanced Time Library - Commented out due to conflicts
 //#include <Packet.h>     // Custom Packet Library
 
+/* ============================================
+ * TEMPERATURE SENSOR SELECTION
+ * ============================================
+ * Uncomment ONE or BOTH sensors you want to use:
+ * - USE_SHT45: Temperature + Humidity sensor
+ * - USE_SEN0148: Temperature only sensor (DHT22 - connect Yellow to GPIO 45!)
+ * Both can be enabled simultaneously for redundancy
+ */
+#define USE_SHT45       // SHT45 Temperature/Humidity Sensor
+//#define USE_SEN0148   // SEN0148 Temperature Sensor - ENABLE ONLY AFTER WIRING!
+
 /* Include Custom Sensor Modules */
 #include "OLEDDisplay_Module.h"
-#include "SHT45_Module.h"
+#ifdef USE_SHT45
+  #include "SHT45_Module.h"
+#endif
+#ifdef USE_SEN0148
+  #include "SEN0148_Module.h"
+#endif
 #include "LIS3DH_Module.h"
 #include "SDCard_Module.h"
 #include "NAU7802_Module.h"
@@ -40,6 +56,9 @@
 #define I2C_SENSOR_SCL_PIN  42      // Secondary I2C SCL pin for external sensors
 #define I2C_SENSOR_FREQ     400000  // I2C frequency: 400kHz
 #define I2C_TIMEOUT         1000    // I2C timeout in milliseconds
+
+// SEN0148 DHT22 Pin Definition (Single-Wire Digital, NOT I2C!)
+#define SEN0148_DATA_PIN    45      // GPIO pin for SEN0148 DHT22 data line (Yellow wire)
 
 // Sensor I2C Addresses
 #define SHT45_I2C_ADDRESS   0x44    // SHT45 temperature/humidity sensor address
@@ -75,7 +94,12 @@
  * Global Objects (External Declarations)
  */
 extern TwoWire I2C_Sensors;              // Secondary I2C bus for external sensors
-extern OLEDDisplay_Module oledDisplay;   // OLED display module
+#ifdef USE_SHT45
+  extern SHT45_Module sht45;             // SHT45 temperature/humidity sensor
+#endif
+#ifdef USE_SEN0148
+  extern SEN0148_Module sen0148;         // SEN0148 temperature sensor
+#endif
 extern SHT45_Module sht45;               // SHT45 temperature/humidity sensor
 extern LIS3DH_Module lis3dh;             // LIS3DH accelerometer
 extern SDCard_Module sdCard;             // SD card module

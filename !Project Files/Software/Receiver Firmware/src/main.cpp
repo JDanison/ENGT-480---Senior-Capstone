@@ -15,7 +15,12 @@
  */
 TwoWire I2C_Sensors = TwoWire(1);                           // Secondary I2C bus instance
 OLEDDisplay_Module oledDisplay;                             // OLED display instance
-SHT45_Module sht45(&I2C_Sensors, SHT45_I2C_ADDRESS);        // SHT45 sensor instance
+#ifdef USE_SHT45
+  SHT45_Module sht45(&I2C_Sensors, SHT45_I2C_ADDRESS);      // SHT45 sensor instance
+#endif
+#ifdef USE_SEN0148
+  SEN0148_Module sen0148(SEN0148_DATA_PIN);                 // SEN0148 DHT22 sensor instance
+#endif
 LIS3DH_Module lis3dh(&I2C_Sensors, LIS3DH_I2C_ADDRESS);     // LIS3DH accelerometer instance
 NAU7802_Module nau7802(&I2C_Sensors, NAU7802_I2C_ADDRESS);  // NAU7802 ADC for strain gauges
 
@@ -309,11 +314,33 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
   char filename[32];
   snprintf(filename, sizeof(filename), "/events/event %d.txt", eventNumber);
   
-  // Read temperature and humidity
-  float temp = 0.0, humidity = 0.0;
-  if (sht45.read()) {
-    temp = sht45.getTemperature();
-    humidity = sht45.getHumidity();
+  // Read temperature and humidity from both sensors
+  float tempSHT45 = 0.0, tempSEN0148 = 0.0, humidity = 0.0;
+  float tempAvg = 0.0;
+  int activeSensors = 0;
+  bool sht45Read = false, sen0148Read = false;
+  
+  #ifdef USE_SHT45
+    if (sht45.read()) {
+      tempSHT45 = sht45.getTemperature();
+      humidity = sht45.getHumidity();
+      tempAvg += tempSHT45;
+      activeSensors++;
+      sht45Read = true;
+    }
+  #endif
+  
+  #ifdef USE_SEN0148
+    if (sen0148.read()) {
+      tempSEN0148 = sen0148.getTemperature();
+      tempAvg += tempSEN0148;
+      activeSensors++;
+      sen0148Read = true;
+    }
+  #endif
+  
+  if (activeSensors > 0) {
+    tempAvg /= activeSensors;
   }
   
   // Pre-allocate large string buffer
@@ -323,8 +350,29 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
   // Build event header
   eventData = "=== EVENT " + String(eventNumber) + " ===\n";
   eventData += "Timestamp: " + getFormattedTime() + "\n";
-  eventData += "Temperature: " + String(temp, 2) + " C\n";
-  eventData += "Humidity: " + String(humidity, 2) + " %\n";
+  
+  // Display temperature readings from both sensors
+  #ifdef USE_SHT45
+    if (sht45Read) {
+      eventData += "Temperature (SHT45): " + String(tempSHT45, 2) + " C\n";
+      eventData += "Humidity (SHT45): " + String(humidity, 2) + " %\n";
+    }
+  #endif
+  
+  #ifdef USE_SEN0148
+    if (sen0148Read) {
+      eventData += "Temperature (SEN0148): " + String(tempSEN0148, 2) + " C\n";
+    }
+  #endif
+  
+  // Show average if both sensors are active
+  #if defined(USE_SHT45) && defined(USE_SEN0148)
+    if (sht45Read && sen0148Read) {
+      eventData += "Temperature (Average): " + String(tempAvg, 2) + " C\n";
+      float tempDiff = abs(tempSHT45 - tempSEN0148);
+      eventData += "Temperature Difference: " + String(tempDiff, 2) + " C\n";
+    }
+  #endif
   eventData += "\nAccelerometer Samples (20):\n";
   eventData += "Sample, X(g), Y(g), Z(g)\n";
   
@@ -423,13 +471,25 @@ void setup() {
   I2C_Sensors.begin(I2C_SENSOR_SDA_PIN, I2C_SENSOR_SCL_PIN, I2C_SENSOR_FREQ);
   I2C_Sensors.setTimeout(I2C_TIMEOUT);
   
-  // Initialize SHT45 Temperature/Humidity Sensor
-  Serial.println("\nInitializing SHT45 Sensor...");
-  if (sht45.begin()) {
-    Serial.println("SHT45: OK");
-  } else {
-    Serial.println("SHT45: FAILED");
-  }
+  // Initialize Temperature Sensors
+  #ifdef USE_SHT45
+    Serial.println("\nInitializing SHT45 Sensor...");
+    if (sht45.begin()) {
+      Serial.println("SHT45: OK");
+    } else {
+      Serial.println("SHT45: FAILED");
+    }
+  #endif
+  
+  #ifdef USE_SEN0148
+    Serial.println("\nInitializing SEN0148 Sensor...");
+    if (sen0148.begin()) {
+      Serial.println("SEN0148: OK");
+    } else {
+      Serial.println("SEN0148: FAILED");
+      Serial.printf("SEN0148: Yellow wire MUST go to GPIO %d (NOT I2C SDA!)\n", SEN0148_DATA_PIN);
+    }
+  #endif
   
   // Initialize LIS3DH Accelerometer
   Serial.println("\nInitializing LIS3DH Sensor...");
@@ -468,6 +528,7 @@ void setup() {
   Serial.println("\n--- Serial Commands ---");
   Serial.println("  s - Sync time via WiFi (requires WiFi credentials in main.h)");
   Serial.println("  t - Display current time");
+  Serial.println("  e - Display temperature sensor readings");
   Serial.println("  d - Display all stored events");
   Serial.println("  c - Clear all events from SD card");
   Serial.println("  o - Offload data (playback events, resync time, clear SD)");
@@ -477,8 +538,67 @@ void setup() {
   Serial.println("  m - Monitor strain continuously (press any key to stop)");
   Serial.println("  b - Bridge balance and sensitivity test");
   Serial.println("  1-4 - Test with gain 1x, 2x, 4x, 8x (temporary)");
+  Serial.println("  i - I2C Scanner (scan for connected I2C devices)");
   Serial.println("-----------------------\n");
   delay(2000);
+}
+
+/**
+ * I2C Scanner - Scans all addresses and reports connected devices
+ */
+void scanI2C() {
+  Serial.println("\n=== I2C SCANNER ===");
+  Serial.printf("Scanning I2C bus (SDA=GPIO%d, SCL=GPIO%d)...\n\n", 
+                I2C_SENSOR_SDA_PIN, I2C_SENSOR_SCL_PIN);
+  
+  byte count = 0;
+  Serial.println("     0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F");
+  
+  for (byte address = 0; address < 128; address++) {
+    if (address % 16 == 0) {
+      Serial.printf("%02X: ", address);
+    }
+    
+    I2C_Sensors.beginTransmission(address);
+    byte error = I2C_Sensors.endTransmission();
+    
+    if (error == 0) {
+      Serial.printf("%02X ", address);
+      count++;
+    } else {
+      Serial.print("-- ");
+    }
+    
+    if ((address + 1) % 16 == 0) {
+      Serial.println();
+    }
+  }
+  
+  Serial.println("\n--- Scan Complete ---");
+  Serial.printf("Found %d device(s)\n", count);
+  
+  if (count > 0) {
+    Serial.println("\n--- Known Devices ---");
+    // Check for known devices
+    I2C_Sensors.beginTransmission(SHT45_I2C_ADDRESS);
+    if (I2C_Sensors.endTransmission() == 0) {
+      Serial.printf("0x%02X - SHT45 Temperature/Humidity Sensor\n", SHT45_I2C_ADDRESS);
+    }
+    I2C_Sensors.beginTransmission(LIS3DH_I2C_ADDRESS);
+    if (I2C_Sensors.endTransmission() == 0) {
+      Serial.printf("0x%02X - LIS3DH Accelerometer\n", LIS3DH_I2C_ADDRESS);
+    }
+    I2C_Sensors.beginTransmission(NAU7802_I2C_ADDRESS);
+    if (I2C_Sensors.endTransmission() == 0) {
+      Serial.printf("0x%02X - NAU7802 ADC (Strain Gauge)\n", NAU7802_I2C_ADDRESS);
+    }
+  } else {
+    Serial.println("\n⚠️  No I2C devices found!");
+    Serial.println("Check wiring and power supply.");
+  }
+  
+  Serial.println("NOTE: SEN0148 is NOT an I2C device - it uses DHT22 protocol on a GPIO pin\n");
+  Serial.println("===================\n");
 }
 
 /**
@@ -507,6 +627,70 @@ void processSerialCommand(char command) {
     case 'T':
       Serial.print("Current time: ");
       Serial.println(getFormattedTime());
+      break;
+      
+    case 'e':
+    case 'E':
+      {
+        Serial.println("\\n=== TEMPERATURE SENSOR READINGS ===");
+        bool anySensor = false;
+        
+        #ifdef USE_SHT45
+          if (sht45.read()) {
+            float tempSHT = sht45.getTemperature();
+            float humSHT = sht45.getHumidity();
+            Serial.println("SHT45 Sensor:");
+            Serial.printf("  Temperature: %.2f °C (%.2f °F)\\n", tempSHT, tempSHT * 9.0/5.0 + 32.0);
+            Serial.printf("  Humidity:    %.2f %%\\n", humSHT);
+            anySensor = true;
+          } else {
+            Serial.println("SHT45 Sensor: READ FAILED");
+          }
+          Serial.println();
+        #endif
+        
+        #ifdef USE_SEN0148
+          if (sen0148.read()) {
+            float tempSEN = sen0148.getTemperature();
+            Serial.println("SEN0148 Sensor:");
+            Serial.printf("  Temperature: %.2f °C (%.2f °F)\\n", tempSEN, tempSEN * 9.0/5.0 + 32.0);
+            anySensor = true;
+            
+            #ifdef USE_SHT45
+              // Show comparison if both sensors active
+              if (sht45.read()) {
+                float difference = abs(tempSEN - sht45.getTemperature());
+                float average = (tempSEN + sht45.getTemperature()) / 2.0;
+                Serial.println();
+                Serial.println("Comparison:");
+                Serial.printf("  Average Temperature: %.2f °C\\n", average);
+                Serial.printf("  Sensor Difference:   %.2f °C\\n", difference);
+                if (difference > 2.0) {
+                  Serial.println("  ⚠️  Large difference detected!");
+                } else {
+                  Serial.println("  ✓ Sensors agree within tolerance");
+                }
+              }
+            #endif
+          } else {
+            Serial.println("SEN0148 Sensor: READ FAILED");
+            Serial.println("  Check I2C address (currently 0x48)");
+          }
+          Serial.println();
+        #endif
+        
+        #if !defined(USE_SHT45) && !defined(USE_SEN0148)
+          Serial.println("⚠️  No temperature sensors enabled!");
+          Serial.println("Enable sensors in main.h using #define USE_SHT45 or USE_SEN0148");
+        #endif
+        
+        if (!anySensor) {
+          Serial.println("⚠️  No sensors read successfully!");
+          Serial.println("Run I2C scanner (press 'i') to check connections.");
+        }
+        
+        Serial.println("===================================\\n");
+      }
       break;
       
     case 'd':
@@ -759,6 +943,11 @@ void processSerialCommand(char command) {
       }
       break;
       
+    case 'i':
+    case 'I':
+      scanI2C();
+      break;
+      
     default:
       // Ignore unknown commands
       break;
@@ -772,11 +961,37 @@ void loop() {
     processSerialCommand(command);
   }
   
-  // Read temperature and humidity
-  float temp = 0.0, humidity = 0.0;
-  sht45.read(); // Read even if it fails, will use default values
-  temp = sht45.getTemperature();
-  humidity = sht45.getHumidity();
+  // Read temperature and humidity from both sensors
+  float tempSHT45 = 0.0, tempSEN0148 = 0.0, humidity = 0.0;
+  bool sht45Read = false, sen0148Read = false;
+  
+  #ifdef USE_SHT45
+    if (sht45.read()) {
+      tempSHT45 = sht45.getTemperature();
+      humidity = sht45.getHumidity();
+      sht45Read = true;
+    }
+  #endif
+  
+  #ifdef USE_SEN0148
+    if (sen0148.read()) {
+      tempSEN0148 = sen0148.getTemperature();
+      sen0148Read = true;
+    }
+  #endif
+  
+  // Calculate average temperature for compatibility
+  float temp = 0.0;
+  int activeSensors = 0;
+  #ifdef USE_SHT45
+    if (sht45Read) { temp += tempSHT45; activeSensors++; }
+  #endif
+  #ifdef USE_SEN0148
+    if (sen0148Read) { temp += tempSEN0148; activeSensors++; }
+  #endif
+  if (activeSensors > 0) {
+    temp /= activeSensors;
+  }
   
   // Read accelerometer
   if (lis3dh.read()) {
