@@ -68,6 +68,22 @@ class SDCard_Module {
      * @return true if successful, false otherwise
      */
     bool deleteFile(const char* filename);
+
+    /**
+     * Delete all files in a directory (non-recursive)
+     * @param directory Directory path (e.g., "/events")
+     * @return true if operation completed without delete errors, false otherwise
+     */
+    bool deleteAllFilesInDirectory(const char* directory);
+
+    /**
+     * Print CSV data rows for files matching prefix in a directory
+     * Header rows that start with "timestamp," are ignored
+     * @param directory Directory path (e.g., "/events")
+     * @param prefix Filename prefix (e.g., "event ")
+     * @return true if at least one data row was printed, false otherwise
+     */
+    bool printCsvDataRows(const char* directory, const char* prefix);
     
     /**
      * Get next available event number (for sequential naming)

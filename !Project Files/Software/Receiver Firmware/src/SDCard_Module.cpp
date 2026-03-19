@@ -82,7 +82,7 @@ bool SDCard_Module::writeFile(const char* filename, const char* message, bool ap
     return false;
   }
   
-  if (!file.println(message)) {
+  if (!file.print(message)) {
     Serial.println("Write failed");
     file.close();
     return false;
@@ -169,6 +169,86 @@ bool SDCard_Module::deleteFile(const char* filename) {
     Serial.printf("Failed to delete: %s\n", filename);
     return false;
   }
+}
+
+bool SDCard_Module::deleteAllFilesInDirectory(const char* directory) {
+  if (!initialized) {
+    Serial.println("SD Card not initialized");
+    return false;
+  }
+
+  if (!SD.exists(directory)) {
+    return false;
+  }
+
+  File root = SD.open(directory);
+  if (!root || !root.isDirectory()) {
+    return false;
+  }
+
+  bool allDeleted = true;
+  File file = root.openNextFile();
+  while (file) {
+    if (!file.isDirectory()) {
+      String filename = String(file.name());
+      String fullPath = String(directory) + "/" + filename;
+      file.close();
+
+      if (SD.remove(fullPath.c_str())) {
+        Serial.printf("Deleted: %s\n", fullPath.c_str());
+      } else {
+        Serial.printf("Failed to delete: %s\n", fullPath.c_str());
+        allDeleted = false;
+      }
+    } else {
+      file.close();
+    }
+    file = root.openNextFile();
+  }
+
+  root.close();
+  return allDeleted;
+}
+
+bool SDCard_Module::printCsvDataRows(const char* directory, const char* prefix) {
+  if (!initialized) {
+    Serial.println("SD Card not initialized");
+    return false;
+  }
+
+  File root = SD.open(directory);
+  if (!root || !root.isDirectory()) {
+    return false;
+  }
+
+  bool foundDataRows = false;
+  File file = root.openNextFile();
+  while (file) {
+    if (!file.isDirectory()) {
+      String filename = String(file.name());
+      if (filename.startsWith(prefix) && filename.endsWith(".csv")) {
+        while (file.available()) {
+          String line = file.readStringUntil('\n');
+          line.replace("\r", "");
+          line.trim();
+
+          if (line.length() > 0 && !line.startsWith("timestamp,")) {
+            Serial.println(line);
+            foundDataRows = true;
+          }
+        }
+        file.close();
+      } else {
+        file.close();
+      }
+    } else {
+      file.close();
+    }
+    file = root.openNextFile();
+  }
+
+  root.close();
+  return foundDataRows;
 }
 
 int SDCard_Module::getNextEventNumber(const char* directory, const char* prefix) {

@@ -30,6 +30,7 @@
 #include "LIS3DH_Module.h"
 #include "SDCard_Module.h"
 #include "NAU7802_Module.h"
+#include "EventLogger_Module.h"
 
 
 /**

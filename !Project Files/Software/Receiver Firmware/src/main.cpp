@@ -22,6 +22,7 @@ NAU7802_Module nau7802(&I2C_Sensors, NAU7802_I2C_ADDRESS);  // NAU7802 ADC for s
 // SD Card - Initialize SPI on HSPI bus
 SPIClass spiSD(HSPI);
 SDCard_Module sdCard(&spiSD, SDCARD_CS);
+EventLogger_Module eventLogger(&sdCard);
 
 /**
  * Circular buffer for continuous accelerometer data capture
@@ -31,9 +32,6 @@ struct AccelSample {
   float x;
   float y;
   float z;
-  int32_t strainRaw;
-  int32_t strainZeroed;
-  float strainMicro;
   unsigned long timestamp;
 };
 
@@ -217,24 +215,17 @@ String getFormattedTime() {
  * Delete all event files from SD card
  */
 void deleteAllEventFiles() {
+  if (!sdCard.isInitialized()) {
+    Serial.println("SD card is not initialized. Cannot clear files.");
+    return;
+  }
+
   // Delete event files
   if (sdCard.fileExists("/events")) {
-    File root = SD.open("/events");
-    if (root && root.isDirectory()) {
-      File file = root.openNextFile();
-      while (file) {
-        if (!file.isDirectory()) {
-          String filename = String(file.name());
-          String fullPath = "/events/" + filename;
-          file.close();
-          sdCard.deleteFile(fullPath.c_str());
-        } else {
-          file.close();
-        }
-        file = root.openNextFile();
-      }
-      root.close();
+    if (sdCard.deleteAllFilesInDirectory("/events")) {
       Serial.println("All event files deleted.");
+    } else {
+      Serial.println("Some event files could not be deleted.");
     }
   } else {
     Serial.println("No events directory found.");
@@ -242,22 +233,10 @@ void deleteAllEventFiles() {
   
   // Delete lab-testing files
   if (sdCard.fileExists("/lab-testing")) {
-    File root = SD.open("/lab-testing");
-    if (root && root.isDirectory()) {
-      File file = root.openNextFile();
-      while (file) {
-        if (!file.isDirectory()) {
-          String filename = String(file.name());
-          String fullPath = "/lab-testing/" + filename;
-          file.close();
-          sdCard.deleteFile(fullPath.c_str());
-        } else {
-          file.close();
-        }
-        file = root.openNextFile();
-      }
-      root.close();
+    if (sdCard.deleteAllFilesInDirectory("/lab-testing")) {
       Serial.println("All lab-testing files deleted.");
+    } else {
+      Serial.println("Some lab-testing files could not be deleted.");
     }
   } else {
     Serial.println("No lab-testing directory found.");
@@ -292,25 +271,22 @@ void offloadData() {
 /**
  * Event capture function
  * Called when accelerometer threshold is exceeded
- * FAST: Captures 20 samples immediately, THEN formats and saves
+ * FAST: Captures paired samples immediately, THEN formats and saves
  */
 void captureEvent(float triggerX, float triggerY, float triggerZ) {
-  static int eventNumber = 0;
-  
   unsigned long captureStart = millis();
   
   // Create temporary array to store samples during fast capture
-  AccelSample eventSamples[EVENT_MAX_SAMPLES];
+  EventLogger_Module::EventSample eventSamples[EVENT_MAX_SAMPLES];
   int sampleCount = 1;
   
   // Store trigger sample as first sample
   eventSamples[0].x = triggerX;
   eventSamples[0].y = triggerY;
   eventSamples[0].z = triggerZ;
-  eventSamples[0].strainRaw = nau7802.readRaw();
-  eventSamples[0].strainZeroed = eventSamples[0].strainRaw - nau7802.getZeroOffset();
-  eventSamples[0].strainMicro = nau7802.calculateStrain(eventSamples[0].strainZeroed, 3.3, 2.0) * 1000000.0;
-  eventSamples[0].timestamp = millis();
+  int32_t triggerStrainRaw = nau7802.readRaw();
+  int32_t triggerStrainZeroed = triggerStrainRaw - nau7802.getZeroOffset();
+  eventSamples[0].strainMicro = nau7802.calculateStrain(triggerStrainZeroed, 3.3, 2.0) * 1000000.0;
   
   Serial.printf("\n!!! EVENT TRIGGERED !!! Capturing for %d ms...", EVENT_CAPTURE_DURATION_MS);
   
@@ -329,10 +305,9 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
       eventSamples[i].z = 0.0;
     }
 
-    eventSamples[i].strainRaw = nau7802.readRaw();
-    eventSamples[i].strainZeroed = eventSamples[i].strainRaw - nau7802.getZeroOffset();
-    eventSamples[i].strainMicro = nau7802.calculateStrain(eventSamples[i].strainZeroed, 3.3, 2.0) * 1000000.0;
-    eventSamples[i].timestamp = millis();
+    int32_t strainRaw = nau7802.readRaw();
+    int32_t strainZeroed = strainRaw - nau7802.getZeroOffset();
+    eventSamples[i].strainMicro = nau7802.calculateStrain(strainZeroed, 3.3, 2.0) * 1000000.0;
 
     sampleCount++;
     Serial.print(".");
@@ -349,13 +324,6 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
   Serial.println("Saving to SD card...");
   unsigned long saveStart = millis();
   
-  // Get next event number from SD card
-  eventNumber = sdCard.getNextEventNumber("/events", "event ");
-  
-  // Create filename
-  char filename[32];
-  snprintf(filename, sizeof(filename), "/events/event %d.txt", eventNumber);
-  
   // Read temperature and humidity
   float temp = 0.0, humidity = 0.0;
   if (sht45.read()) {
@@ -363,43 +331,24 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
     humidity = sht45.getHumidity();
   }
   
-  // Pre-allocate large string buffer
-  String eventData;
-  eventData.reserve(1024);
-  
-  // Build event header
-  eventData = "=== EVENT " + String(eventNumber) + " ===\n";
-  eventData += "Timestamp: " + getFormattedTime() + "\n";
-  eventData += "Temperature: " + String(temp, 2) + " C\n";
-  eventData += "Humidity: " + String(humidity, 2) + " %\n";
-  eventData += "CaptureDurationMs: " + String(EVENT_CAPTURE_DURATION_MS) + "\n";
-  eventData += "CapturedSamples: " + String(sampleCount) + "\n";
-  eventData += "\nPaired Samples (Acceleration + Strain):\n";
-  eventData += "Sample, ElapsedMs, X(g), Y(g), Z(g), StrainRaw, StrainZeroed, Strain(uE)\n";
-  
-  // Format all captured samples
-  char sampleLine[160];
-  for (int i = 0; i < sampleCount; i++) {
-    unsigned long elapsedMs = eventSamples[i].timestamp - captureStart;
-    snprintf(sampleLine, sizeof(sampleLine), "%d, %lu, %.3f, %.3f, %.3f, %ld, %ld, %.2f\n", 
-             i+1, 
-             elapsedMs,
-             eventSamples[i].x, 
-             eventSamples[i].y, 
-             eventSamples[i].z,
-             eventSamples[i].strainRaw,
-             eventSamples[i].strainZeroed,
-             eventSamples[i].strainMicro);
-    eventData += sampleLine;
-  }
-  
-  // Write to SD card
-  sdCard.writeFile(filename, eventData.c_str(), false);
+  // Save CSV data row only (no header row)
+  String savedFilename;
+  bool writeOk = eventLogger.saveEventCsv(eventSamples,
+                                          sampleCount,
+                                          temp,
+                                          humidity,
+                                          getFormattedTime(),
+                                          nullptr,
+                                          &savedFilename);
   
   unsigned long saveTime = millis() - saveStart;
   unsigned long totalTime = millis() - captureStart;
   
-  Serial.printf("Saved to: %s\n", filename);
+  if (writeOk) {
+    Serial.printf("Saved to: %s\n", savedFilename.c_str());
+  } else {
+    Serial.printf("Failed to save event file: %s\n", savedFilename.c_str());
+  }
   Serial.printf("Capture: %lums, Save: %lums, Total: %lums\n\n", captureTime, saveTime, totalTime);
 }
 
@@ -408,9 +357,10 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
  * Called during setup to show previous events
  */
 void playbackEvents() {
-  Serial.println("\n======================================");
-  Serial.println("      PREVIOUS EVENTS PLAYBACK");
-  Serial.println("======================================\n");
+  if (!sdCard.isInitialized()) {
+    Serial.println("SD card is not initialized. Cannot playback events.\n");
+    return;
+  }
   
   // Check if events directory exists
   if (!sdCard.fileExists("/events")) {
@@ -418,41 +368,11 @@ void playbackEvents() {
     return;
   }
   
-  // List all files in events directory
-  File root = SD.open("/events");
-  if (!root || !root.isDirectory()) {
-    Serial.println("Failed to open events directory\n");
-    return;
-  }
-  
-  bool foundEvents = false;
-  File file = root.openNextFile();
-  while (file) {
-    if (!file.isDirectory()) {
-      String filename = String(file.name());
-      if (filename.startsWith("event ")) {
-        foundEvents = true;
-        Serial.println("--------------------------------------");
-        Serial.printf("Reading: %s\n", file.name());
-        Serial.println("--------------------------------------");
-        
-        // Read and print file contents
-        String fullPath = "/events/" + filename;
-        String content = sdCard.readFile(fullPath.c_str());
-        Serial.println(content);
-        Serial.println();
-      }
-    }
-    file = root.openNextFile();
-  }
+  bool foundEvents = sdCard.printCsvDataRows("/events", "event ");
   
   if (!foundEvents) {
     Serial.println("No previous events found.\n");
   }
-  
-  Serial.println("======================================");
-  Serial.println("      END OF PLAYBACK");
-  Serial.println("======================================\n");
 }
 
 void setup() {
