@@ -31,6 +31,9 @@ struct AccelSample {
   float x;
   float y;
   float z;
+  int32_t strainRaw;
+  int32_t strainZeroed;
+  float strainMicro;
   unsigned long timestamp;
 };
 
@@ -297,26 +300,46 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
   unsigned long captureStart = millis();
   
   // Create temporary array to store samples during fast capture
-  AccelSample eventSamples[EVENT_SAMPLE_COUNT];
+  AccelSample eventSamples[EVENT_MAX_SAMPLES];
+  int sampleCount = 1;
   
   // Store trigger sample as first sample
   eventSamples[0].x = triggerX;
   eventSamples[0].y = triggerY;
   eventSamples[0].z = triggerZ;
+  eventSamples[0].strainRaw = nau7802.readRaw();
+  eventSamples[0].strainZeroed = eventSamples[0].strainRaw - nau7802.getZeroOffset();
+  eventSamples[0].strainMicro = nau7802.calculateStrain(eventSamples[0].strainZeroed, 3.3, 2.0) * 1000000.0;
   eventSamples[0].timestamp = millis();
   
-  Serial.printf("\n!!! EVENT TRIGGERED !!! Capturing...");
+  Serial.printf("\n!!! EVENT TRIGGERED !!! Capturing for %d ms...", EVENT_CAPTURE_DURATION_MS);
   
-  // FAST CAPTURE: Read the next 19 samples as quickly as possible
-  for (int i = 1; i < EVENT_SAMPLE_COUNT; i++) {
-    delay(10); // 10ms for 100Hz sampling
-    if (lis3dh.read()) {
+  // PAIRED CAPTURE: Collect accel + strain pairs for a fixed duration (1:1 pairing)
+  while ((millis() - captureStart) < EVENT_CAPTURE_DURATION_MS && sampleCount < EVENT_MAX_SAMPLES) {
+    bool accelOk = lis3dh.read();
+    int i = sampleCount;
+
+    if (accelOk) {
       eventSamples[i].x = lis3dh.getX();
       eventSamples[i].y = lis3dh.getY();
       eventSamples[i].z = lis3dh.getZ();
-      eventSamples[i].timestamp = millis();
-      Serial.print(".");
+    } else {
+      eventSamples[i].x = 0.0;
+      eventSamples[i].y = 0.0;
+      eventSamples[i].z = 0.0;
     }
+
+    eventSamples[i].strainRaw = nau7802.readRaw();
+    eventSamples[i].strainZeroed = eventSamples[i].strainRaw - nau7802.getZeroOffset();
+    eventSamples[i].strainMicro = nau7802.calculateStrain(eventSamples[i].strainZeroed, 3.3, 2.0) * 1000000.0;
+    eventSamples[i].timestamp = millis();
+
+    sampleCount++;
+    Serial.print(".");
+  }
+
+  if (sampleCount >= EVENT_MAX_SAMPLES) {
+    Serial.print(" [MAX BUFFER REACHED]");
   }
   
   unsigned long captureTime = millis() - captureStart;
@@ -349,17 +372,24 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
   eventData += "Timestamp: " + getFormattedTime() + "\n";
   eventData += "Temperature: " + String(temp, 2) + " C\n";
   eventData += "Humidity: " + String(humidity, 2) + " %\n";
-  eventData += "\nAccelerometer Samples (20):\n";
-  eventData += "Sample, X(g), Y(g), Z(g)\n";
+  eventData += "CaptureDurationMs: " + String(EVENT_CAPTURE_DURATION_MS) + "\n";
+  eventData += "CapturedSamples: " + String(sampleCount) + "\n";
+  eventData += "\nPaired Samples (Acceleration + Strain):\n";
+  eventData += "Sample, ElapsedMs, X(g), Y(g), Z(g), StrainRaw, StrainZeroed, Strain(uE)\n";
   
   // Format all captured samples
-  char sampleLine[64];
-  for (int i = 0; i < EVENT_SAMPLE_COUNT; i++) {
-    snprintf(sampleLine, sizeof(sampleLine), "%d, %.3f, %.3f, %.3f\n", 
+  char sampleLine[160];
+  for (int i = 0; i < sampleCount; i++) {
+    unsigned long elapsedMs = eventSamples[i].timestamp - captureStart;
+    snprintf(sampleLine, sizeof(sampleLine), "%d, %lu, %.3f, %.3f, %.3f, %ld, %ld, %.2f\n", 
              i+1, 
+             elapsedMs,
              eventSamples[i].x, 
              eventSamples[i].y, 
-             eventSamples[i].z);
+             eventSamples[i].z,
+             eventSamples[i].strainRaw,
+             eventSamples[i].strainZeroed,
+             eventSamples[i].strainMicro);
     eventData += sampleLine;
   }
   

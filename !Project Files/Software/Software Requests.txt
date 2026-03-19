@@ -1,0 +1,9 @@
+Notes From Meeting (3/6/26):
+Customization Inputs (Via Gui or Someting)
+For Data Purposes:
+1) Temp and RH time / frequency
+2) Acceleration / Strain frequency
+3) Acceleration Threshold
+4) Any of the #define constants
+
+5) LoRa to offload rather than Wi-Fi | Maybe both?
