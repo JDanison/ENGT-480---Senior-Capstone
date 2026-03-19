@@ -61,6 +61,9 @@
 #define EVENT_CAPTURE_DURATION_MS 2000 // Event capture window in milliseconds
 #define EVENT_MAX_SAMPLES      80      // Safety cap for paired accel+strain samples in one event
 
+// Lab Test Configuration
+#define LAB_TEST_SAMPLE_RATE_HZ  20  // Lab test sampling rate (10 or 20 Hz)
+
 // WiFi Configuration (for time sync)
 // NOTE: Update these with your WiFi credentials before deploying
 #define WIFI_SSID_PRIMARY       "NetHouse"              // Primary WiFi network

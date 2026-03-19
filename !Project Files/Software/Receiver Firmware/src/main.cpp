@@ -217,6 +217,7 @@ String getFormattedTime() {
  * Delete all event files from SD card
  */
 void deleteAllEventFiles() {
+  // Delete event files
   if (sdCard.fileExists("/events")) {
     File root = SD.open("/events");
     if (root && root.isDirectory()) {
@@ -237,6 +238,29 @@ void deleteAllEventFiles() {
     }
   } else {
     Serial.println("No events directory found.");
+  }
+  
+  // Delete lab-testing files
+  if (sdCard.fileExists("/lab-testing")) {
+    File root = SD.open("/lab-testing");
+    if (root && root.isDirectory()) {
+      File file = root.openNextFile();
+      while (file) {
+        if (!file.isDirectory()) {
+          String filename = String(file.name());
+          String fullPath = "/lab-testing/" + filename;
+          file.close();
+          sdCard.deleteFile(fullPath.c_str());
+        } else {
+          file.close();
+        }
+        file = root.openNextFile();
+      }
+      root.close();
+      Serial.println("All lab-testing files deleted.");
+    }
+  } else {
+    Serial.println("No lab-testing directory found.");
   }
 }
 
@@ -505,6 +529,7 @@ void setup() {
   Serial.println("  z - Tare/zero the strain gauge");
   Serial.println("  r - Restart NAU7802 conversions (if timeouts occur)");
   Serial.println("  m - Monitor strain continuously (press any key to stop)");
+  Serial.println("  l - Lab test: Log strain readings to SD card (press any key to stop)");
   Serial.println("  b - Bridge balance and sensitivity test");
   Serial.println("  1-4 - Test with gain 1x, 2x, 4x, 8x (temporary)");
   Serial.println("-----------------------\n");
@@ -786,6 +811,109 @@ void processSerialCommand(char command) {
         }
         
         Serial.println("\n===========================\n");
+      }
+      break;
+      
+    case 'l':
+    case 'L':
+      {
+        Serial.println("\n=== LAB TEST: CONTINUOUS STRAIN LOGGING ===");
+        Serial.printf("Sample Rate: %d Hz\n", LAB_TEST_SAMPLE_RATE_HZ);
+        Serial.println("[LOG_START]");
+        Serial.println("Recording raw strain gauge data...");
+        Serial.println("Apply load now. Press any key to stop.\n");
+        Serial.println("Time(s), Raw, Zeroed, Strain(με)");
+        Serial.println("---------------------------------------");
+        
+        // Clear any pending serial bytes
+        while (Serial.available()) {
+          Serial.read();
+        }
+        
+        // Allocate dynamic array for storing samples (max 10000 samples = ~16 minutes at 10Hz)
+        const int MAX_SAMPLES = 10000;
+        struct StrainSample {
+          float time;
+          int32_t raw;
+          int32_t zeroed;
+          float microstrain;
+        };
+        
+        StrainSample* samples = new StrainSample[MAX_SAMPLES];
+        
+        unsigned long startTime = millis();
+        int sampleCount = 0;
+        int sampleDelay = 1000 / LAB_TEST_SAMPLE_RATE_HZ; // Calculate delay from sample rate
+        
+        // Fast data acquisition loop - NO SD card writes!
+        while (!Serial.available() && sampleCount < MAX_SAMPLES) {
+          // Read RAW value only - fastest method
+          int32_t raw = nau7802.readRaw();
+          int32_t zeroed = raw - nau7802.getZeroOffset();
+          float strain = nau7802.calculateStrain(zeroed, 3.3, 2.0);
+          float microstrain = strain * 1000000.0;
+          float elapsedTime = (millis() - startTime) / 1000.0;
+          
+          // Store in memory
+          samples[sampleCount].time = elapsedTime;
+          samples[sampleCount].raw = raw;
+          samples[sampleCount].zeroed = zeroed;
+          samples[sampleCount].microstrain = microstrain;
+          
+          // Display to serial
+          Serial.printf("%.2f, %8ld, %8ld, %9.2f\n", elapsedTime, raw, zeroed, microstrain);
+          
+          sampleCount++;
+          delay(sampleDelay); // Delay based on LAB_TEST_SAMPLE_RATE_HZ
+        }
+        
+        // Clear the serial buffer
+        while (Serial.available()) Serial.read();
+        
+        Serial.println("---------------------------------------");
+        Serial.printf("Monitoring stopped. Collected %d samples.\n", sampleCount);
+        Serial.println("\nSaving to SD card...");
+        
+        // NOW save everything to SD card
+        int logNumber = sdCard.getNextEventNumber("/lab-testing", "strain-log");
+        char filename[64];
+        snprintf(filename, sizeof(filename), "/lab-testing/strain-log%d.txt", logNumber);
+        
+        // Build complete file content
+        String fileContent;
+        fileContent.reserve(sampleCount * 50 + 512); // Pre-allocate memory
+        
+        // Header
+        fileContent = "=== STRAIN GAUGE LAB TEST LOG " + String(logNumber) + " ===\n";
+        fileContent += "Timestamp: " + getFormattedTime() + "\n";
+        fileContent += "Sample Rate: " + String(LAB_TEST_SAMPLE_RATE_HZ) + " Hz\n";
+        fileContent += "Gain: 32x\n";
+        fileContent += "Samples: " + String(sampleCount) + "\n";
+        fileContent += "Duration: " + String((millis() - startTime) / 1000.0) + " seconds\n";
+        fileContent += "\nTime(s), Raw, Zeroed, Strain(με)\n";
+        fileContent += "---------------------------------------\n";
+        
+        // All data samples
+        for (int i = 0; i < sampleCount; i++) {
+          char line[64];
+          snprintf(line, sizeof(line), "%.2f, %ld, %ld, %.2f\n",
+                   samples[i].time, samples[i].raw, samples[i].zeroed, samples[i].microstrain);
+          fileContent += line;
+        }
+        
+        // Footer
+        fileContent += "---------------------------------------\n";
+        fileContent += "[LOG_END]\n";
+        
+        // Write entire file at once
+        sdCard.writeFile(filename, fileContent.c_str(), false);
+        
+        Serial.printf("Data saved to: %s\n", filename);
+        Serial.println("[LOG_END]");
+        Serial.println("===========================\n");
+        
+        // Free memory
+        delete[] samples;
       }
       break;
       
