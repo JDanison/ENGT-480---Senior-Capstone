@@ -60,6 +60,9 @@
 #define ACCEL_THRESHOLD      2.0    // Accelerometer threshold in g's
 #define EVENT_SAMPLE_COUNT   20     // Number of accelerometer samples to capture per event
 
+// Lab Test Configuration
+#define LAB_TEST_SAMPLE_RATE_HZ  20  // Lab test sampling rate (10 or 20 Hz)
+
 // WiFi Configuration (for time sync)
 // NOTE: Update these with your WiFi credentials before deploying
 #define WIFI_SSID_PRIMARY       "NetHouse"              // Primary WiFi network
