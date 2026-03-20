@@ -53,6 +53,22 @@
 #define SDCARD_SCK          35      // SD card SCK pin (White wire)
 #define SDCARD_CS           36      // SD card CS pin (Yellow wire)
 
+// LoRa (SX1262) Pin Definitions for Heltec WiFi LoRa 32 V3
+#define LORA_NSS            8
+#define LORA_DIO1           14
+#define LORA_RST            12
+#define LORA_BUSY           13
+
+// LoRa Radio Link Configuration
+#define LORA_FREQUENCY_MHZ  915.0
+#define LORA_BANDWIDTH_KHZ  125.0
+#define LORA_SPREADING_FACTOR 9
+#define LORA_CODING_RATE    7
+#define LORA_SYNC_WORD      0x34
+#define LORA_TX_POWER_DBM   14
+#define LORA_PREAMBLE_LEN   8
+#define LORA_DATA_CHUNK_SIZE 180
+
 // Serial Configuration
 #define SERIAL_BAUD_RATE    115200  // Serial monitor baud rate
 

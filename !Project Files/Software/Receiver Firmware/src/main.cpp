@@ -23,6 +23,148 @@ NAU7802_Module nau7802(&I2C_Sensors, NAU7802_I2C_ADDRESS);  // NAU7802 ADC for s
 SPIClass spiSD(HSPI);
 SDCard_Module sdCard(&spiSD, SDCARD_CS);
 EventLogger_Module eventLogger(&sdCard);
+SX1262 loraRadio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
+
+volatile bool loraPacketReceived = false;
+
+void processSerialCommand(char command);
+
+#if defined(ESP8266) || defined(ESP32)
+  ICACHE_RAM_ATTR
+#endif
+void setLoRaFlag(void) {
+  loraPacketReceived = true;
+}
+
+bool sendLoRaMessage(const String& payload) {
+  int txState = loraRadio.transmit(payload.c_str());
+  if (txState != RADIOLIB_ERR_NONE) {
+    Serial.printf("LoRa TX failed (%d)\n", txState);
+    return false;
+  }
+  return true;
+}
+
+void restartLoRaReceive() {
+  int rxState = loraRadio.startReceive();
+  if (rxState != RADIOLIB_ERR_NONE) {
+    Serial.printf("LoRa RX start failed (%d)\n", rxState);
+  }
+}
+
+void sendCsvLineOverLoRa(const String& line) {
+  if (line.length() <= LORA_DATA_CHUNK_SIZE) {
+    sendLoRaMessage("DATA:" + line);
+    return;
+  }
+
+  int index = 0;
+  while (index < line.length()) {
+    int remaining = line.length() - index;
+    int take = remaining > LORA_DATA_CHUNK_SIZE ? LORA_DATA_CHUNK_SIZE : remaining;
+    String chunk = line.substring(index, index + take);
+    bool isFinalChunk = (index + take) >= line.length();
+
+    if (isFinalChunk) {
+      sendLoRaMessage("DATA:" + chunk);
+    } else {
+      sendLoRaMessage("DATC:" + chunk);
+    }
+
+    index += take;
+    delay(10);
+  }
+}
+
+bool streamStoredEventsOverLoRa() {
+  if (!sdCard.isInitialized() || !sdCard.fileExists("/events")) {
+    return false;
+  }
+
+  File root = SD.open("/events");
+  if (!root || !root.isDirectory()) {
+    return false;
+  }
+
+  bool sentAnyLine = false;
+  File file = root.openNextFile();
+  while (file) {
+    if (!file.isDirectory()) {
+      String filename = String(file.name());
+      String baseName = filename;
+      int slashIdx = baseName.lastIndexOf('/');
+      if (slashIdx >= 0 && slashIdx < (baseName.length() - 1)) {
+        baseName = baseName.substring(slashIdx + 1);
+      }
+
+      if (baseName.startsWith("event ") && baseName.endsWith(".csv")) {
+        while (file.available()) {
+          String line = file.readStringUntil('\n');
+          line.replace("\r", "");
+          line.trim();
+          if (line.length() == 0 || line.startsWith("timestamp,")) {
+            continue;
+          }
+
+          sendCsvLineOverLoRa(line);
+          sentAnyLine = true;
+          delay(15);
+        }
+      }
+      file.close();
+    } else {
+      file.close();
+    }
+    file = root.openNextFile();
+  }
+
+  root.close();
+  return sentAnyLine;
+}
+
+void handleLoRaCommandPacket(const String& packet) {
+  if (!packet.startsWith("CMD:") || packet.length() != 5) {
+    // Ignore malformed or unrelated packets to avoid serial spam.
+    return;
+  }
+
+  char command = packet.charAt(4);
+  Serial.printf("LoRa CMD received: %c\n", command);
+
+  if (command == 'd' || command == 'D') {
+    sendLoRaMessage("RSP:BEGIN_D");
+    bool sentData = streamStoredEventsOverLoRa();
+    if (!sentData) {
+      sendLoRaMessage("RSP:NO_DATA");
+    }
+    sendLoRaMessage("END:D");
+    return;
+  }
+
+  // Safety hardening: only allow remote data-dump command over LoRa.
+  // All other commands stay local via receiver USB serial.
+  sendLoRaMessage("RSP:ERR_UNSUPPORTED");
+}
+
+void processLoRaPackets() {
+  if (!loraPacketReceived) {
+    return;
+  }
+
+  loraPacketReceived = false;
+  String packet;
+  int rxState = loraRadio.readData(packet);
+  if (rxState == RADIOLIB_ERR_NONE) {
+    packet.trim();
+    if (packet.startsWith("CMD:") && packet.length() == 5) {
+      handleLoRaCommandPacket(packet);
+    }
+  } else {
+    Serial.printf("LoRa RX read failed (%d)\n", rxState);
+  }
+
+  restartLoRaReceive();
+}
 
 /**
  * Circular buffer for continuous accelerometer data capture
@@ -380,6 +522,22 @@ void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
   delay(1000);
   Serial.println("\n\n=== Heltec Capstone Receiver Starting ===\n");
+
+  Serial.println("Initializing LoRa radio...");
+  int loraState = loraRadio.begin(LORA_FREQUENCY_MHZ,
+                                  LORA_BANDWIDTH_KHZ,
+                                  LORA_SPREADING_FACTOR,
+                                  LORA_CODING_RATE,
+                                  LORA_SYNC_WORD,
+                                  LORA_TX_POWER_DBM,
+                                  LORA_PREAMBLE_LEN);
+  if (loraState == RADIOLIB_ERR_NONE) {
+    loraRadio.setDio1Action(setLoRaFlag);
+    restartLoRaReceive();
+    Serial.println("LoRa: OK");
+  } else {
+    Serial.printf("LoRa: FAILED (%d)\n", loraState);
+  }
 
   // Initialize OLED Display - DISABLED for performance
   /*
@@ -844,6 +1002,9 @@ void processSerialCommand(char command) {
 }
 
 void loop() {
+  // Handle incoming command packets from transmitter
+  processLoRaPackets();
+
   // Check for serial commands
   if (Serial.available() > 0) {
     char command = Serial.read();

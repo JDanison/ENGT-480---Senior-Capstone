@@ -226,7 +226,13 @@ bool SDCard_Module::printCsvDataRows(const char* directory, const char* prefix) 
   while (file) {
     if (!file.isDirectory()) {
       String filename = String(file.name());
-      if (filename.startsWith(prefix) && filename.endsWith(".csv")) {
+      String baseName = filename;
+      int slashIdx = baseName.lastIndexOf('/');
+      if (slashIdx >= 0 && slashIdx < (baseName.length() - 1)) {
+        baseName = baseName.substring(slashIdx + 1);
+      }
+
+      if (baseName.startsWith(prefix) && baseName.endsWith(".csv")) {
         while (file.available()) {
           String line = file.readStringUntil('\n');
           line.replace("\r", "");
