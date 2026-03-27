@@ -7,3 +7,10 @@ For Data Purposes:
 4) Any of the #define constants
 
 5) LoRa to offload rather than Wi-Fi | Maybe both?
+
+TODO Order:
+1) Make sure the Python Application can be offloaded and downloaded / working on other computers.
+2) Customization inputs 
+3) Polishing the data offloading process
+4) Wi-Fi Mode
+5) Switch to Blue/White/Yellow
