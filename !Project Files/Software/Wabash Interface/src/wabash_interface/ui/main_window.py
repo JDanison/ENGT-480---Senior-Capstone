@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 import tkinter as tk
@@ -12,22 +12,22 @@ from serial.tools import list_ports
 from wabash_interface.services.serial_service import SerialConfig, SerialService
 from wabash_interface.storage.log_export import export_text_log
 
-WABASH_RED        = "#C8102E"
-WABASH_RED_HOVER  = "#A30D26"
-BTN_GREY          = "#475569"
-BTN_GREY_HOVER    = "#334155"
-PANEL_LIGHT       = "#F3F4F6"
-PANEL_DARK        = "#111827"
+WABASH_BLUE        = "#1676D2"
+WABASH_BLUE_HOVER  = "#105DA8"
+BTN_GREY          = "#334E73"
+BTN_GREY_HOVER    = "#293F5C"
+PANEL_LIGHT       = "#F2F6FB"
+PANEL_DARK        = "#0D1726"
 CARD_LIGHT        = "#FFFFFF"
-CARD_DARK         = "#1F2937"
+CARD_DARK         = "#162338"
 
 # Log line colour tags (foreground only; works on both light/dark)
 LOG_COLORS = {
-    "tx":      "#F87171",   # soft red  — sent commands
-    "rx":      "#60A5FA",   # soft blue — received data
-    "data":    "#34D399",   # green     — DATA/DATC payload rows
-    "status":  "#FBBF24",   # amber     — status/RSP lines
-    "default": "#D1D5DB",   # grey      — everything else
+    "tx":      "#60A5FA",   # bright blue â€” sent commands
+    "rx":      "#93C5FD",   # soft blue   â€” received data
+    "data":    "#34D399",   # green     â€” DATA/DATC payload rows
+    "status":  "#FBBF24",   # amber     â€” status/RSP lines
+    "default": "#D1D5DB",   # grey      â€” everything else
 }
 
 # Density presets: (pad_x, pad_y_btn, font_size_log, row_padding)
@@ -109,7 +109,7 @@ class MainWindow:
             sidebar,
             text="WABASH NATIONAL",
             font=ctk.CTkFont(size=30, weight="bold"),
-            text_color=WABASH_RED,
+            text_color=WABASH_BLUE,
         ).grid(row=0, column=0, sticky="w", padx=24, pady=(28, 4))
         ctk.CTkLabel(
             sidebar,
@@ -118,7 +118,7 @@ class MainWindow:
             font=ctk.CTkFont(size=14),
         ).grid(row=1, column=0, sticky="w", padx=24, pady=(0, 20))
 
-        ctk.CTkFrame(sidebar, height=3, corner_radius=8, fg_color=WABASH_RED).grid(
+        ctk.CTkFrame(sidebar, height=3, corner_radius=8, fg_color=WABASH_BLUE).grid(
             row=1, column=0, sticky="ew", padx=24, pady=(18, 0)
         )
 
@@ -195,7 +195,7 @@ class MainWindow:
 
         for name, button in self.nav_buttons.items():
             if name == page_name:
-                button.configure(fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER)
+                button.configure(fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER)
             else:
                 button.configure(fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER)
 
@@ -211,7 +211,7 @@ class MainWindow:
         ctk.CTkLabel(header, text="System Dashboard", font=ctk.CTkFont(size=22, weight="bold")).grid(
             row=0, column=0, sticky="w", padx=18, pady=14
         )
-        ctk.CTkLabel(header, text="WABASH", text_color=WABASH_RED, font=ctk.CTkFont(size=16, weight="bold")).grid(
+        ctk.CTkLabel(header, text="WABASH", text_color=WABASH_BLUE, font=ctk.CTkFont(size=16, weight="bold")).grid(
             row=0, column=1, sticky="e", padx=18, pady=14
         )
 
@@ -273,8 +273,8 @@ class MainWindow:
             values=["dark", "light", "system"],
             variable=self.theme_var,
             command=self._set_theme,
-            selected_color=WABASH_RED,
-            selected_hover_color=WABASH_RED_HOVER,
+            selected_color=WABASH_BLUE,
+            selected_hover_color=WABASH_BLUE_HOVER,
         ).grid(row=2, column=0, sticky="ew", padx=16, pady=(4, 10))
 
         ctk.CTkLabel(card, text="Layout Density", text_color=("#475569", "#94A3B8")).grid(
@@ -285,8 +285,8 @@ class MainWindow:
             values=["Compact", "Comfortable"],
             variable=self.density_var,
             command=self._set_density,
-            selected_color=WABASH_RED,
-            selected_hover_color=WABASH_RED_HOVER,
+            selected_color=WABASH_BLUE,
+            selected_hover_color=WABASH_BLUE_HOVER,
         ).grid(row=4, column=0, sticky="ew", padx=16, pady=(4, 10))
 
         ctk.CTkLabel(card, text="Text Size", text_color=("#475569", "#94A3B8")).grid(
@@ -300,9 +300,9 @@ class MainWindow:
             to=1.4,
             number_of_steps=10,
             variable=self.text_scale_var,
-            button_color=WABASH_RED,
-            button_hover_color=WABASH_RED_HOVER,
-            progress_color=WABASH_RED,
+            button_color=WABASH_BLUE,
+            button_hover_color=WABASH_BLUE_HOVER,
+            progress_color=WABASH_BLUE,
             command=self._set_text_scale,
         ).grid(row=7, column=0, sticky="ew", padx=16, pady=(4, 14))
 
@@ -350,8 +350,8 @@ class MainWindow:
             action_row,
             text="Connect",
             command=self._connect,
-            fg_color=WABASH_RED,
-            hover_color=WABASH_RED_HOVER,
+            fg_color=WABASH_BLUE,
+            hover_color=WABASH_BLUE_HOVER,
         )
         self.connect_button.grid(row=0, column=1, padx=3, sticky="ew")
         self.disconnect_button = ctk.CTkButton(
@@ -370,16 +370,16 @@ class MainWindow:
         ctk.CTkLabel(quick_card, text="Quick Commands", font=ctk.CTkFont(size=16, weight="bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 8)
         )
-        ctk.CTkButton(quick_card, text="Request Data  d", command=lambda: self._send_quick("d"), fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER).grid(
+        ctk.CTkButton(quick_card, text="Request Data  d", command=lambda: self._send_quick("d"), fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(
             row=1, column=0, padx=(16, 6), pady=5, sticky="ew"
         )
-        ctk.CTkButton(quick_card, text="Tare  z", command=lambda: self._send_quick("z"), fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER).grid(
+        ctk.CTkButton(quick_card, text="Tare  z", command=lambda: self._send_quick("z"), fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(
             row=1, column=1, padx=(6, 16), pady=5, sticky="ew"
         )
-        ctk.CTkButton(quick_card, text="Monitor  m", command=lambda: self._send_quick("m"), fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER).grid(
+        ctk.CTkButton(quick_card, text="Monitor  m", command=lambda: self._send_quick("m"), fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(
             row=2, column=0, padx=(16, 6), pady=5, sticky="ew"
         )
-        ctk.CTkButton(quick_card, text="Time Sync  s", command=lambda: self._send_quick("s"), fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER).grid(
+        ctk.CTkButton(quick_card, text="Time Sync  s", command=lambda: self._send_quick("s"), fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(
             row=2, column=1, padx=(6, 16), pady=5, sticky="ew"
         )
 
@@ -391,7 +391,7 @@ class MainWindow:
             row=0, column=0, sticky="w", padx=18, pady=14
         )
 
-        ctk.CTkLabel(top_bar, text="WABASH", text_color=WABASH_RED, font=ctk.CTkFont(size=16, weight="bold")).grid(
+        ctk.CTkLabel(top_bar, text="WABASH", text_color=WABASH_BLUE, font=ctk.CTkFont(size=16, weight="bold")).grid(
             row=0, column=1, sticky="e", padx=(10, 170), pady=14
         )
 
@@ -446,7 +446,7 @@ class MainWindow:
         self.search_entry.bind("<FocusOut>", lambda _event: self._on_search_focus_out())
 
         ctk.CTkButton(
-            search_frame, text="✕", width=28, height=28,
+            search_frame, text="âœ•", width=28, height=28,
             fg_color="transparent", hover_color=("#D1D5DB", "#4B5563"),
             command=self._clear_search,
         ).grid(row=0, column=1, padx=(0, 4))
@@ -457,7 +457,7 @@ class MainWindow:
         legend.grid(row=1, column=0, sticky="w", padx=16, pady=(6, 4))
         for label, colour in [("TX", LOG_COLORS["tx"]), ("RX", LOG_COLORS["rx"]),
                               ("Data", LOG_COLORS["data"]), ("Status", LOG_COLORS["status"])]:
-            dot = ctk.CTkLabel(legend, text="●", text_color=colour, width=18, font=ctk.CTkFont(size=10))
+            dot = ctk.CTkLabel(legend, text="â—", text_color=colour, width=18, font=ctk.CTkFont(size=10))
             dot.pack(side="left")
             ctk.CTkLabel(legend, text=label, text_color=("#475569", "#94A3B8"), font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 12))
 
@@ -467,7 +467,7 @@ class MainWindow:
         inner: tk.Text = self.log_text._textbox  # type: ignore[attr-defined]
         for tag, colour in LOG_COLORS.items():
             inner.tag_configure(tag, foreground=colour)
-        inner.tag_configure("search_hl", background=WABASH_RED, foreground="white")
+        inner.tag_configure("search_hl", background=WABASH_BLUE, foreground="white")
 
         bottom = ctk.CTkFrame(content, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         bottom.grid(row=3, column=0, sticky="ew", pady=(12, 0))
@@ -479,7 +479,7 @@ class MainWindow:
 
         self.command_entry = ctk.CTkEntry(command_row, textvariable=self.command_var, placeholder_text="Type custom command and press Send")
         self.command_entry.grid(row=0, column=0, sticky="ew")
-        ctk.CTkButton(command_row, text="Send", width=110, command=self._send_custom, fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER).grid(row=0, column=1, padx=(10, 0))
+        ctk.CTkButton(command_row, text="Send", width=110, command=self._send_custom, fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(row=0, column=1, padx=(10, 0))
 
         button_row = ctk.CTkFrame(bottom, fg_color="transparent")
         button_row.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
@@ -487,7 +487,7 @@ class MainWindow:
         ctk.CTkButton(button_row, text="Clear Log", fg_color=BTN_GREY, hover_color="#64748B", command=self._clear_log).grid(
             row=0, column=0, padx=(0, 6), sticky="ew"
         )
-        ctk.CTkButton(button_row, text="Export Log", fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER, command=self._export_log).grid(
+        ctk.CTkButton(button_row, text="Export Log", fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER, command=self._export_log).grid(
             row=0, column=1, padx=(6, 0), sticky="ew"
         )
 
@@ -592,11 +592,11 @@ class MainWindow:
         if is_connected:
             self.connection_badge.configure(text="Connected", fg_color="#14532D", text_color="#DCFCE7")
             self.connect_button.configure(fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER)
-            self.disconnect_button.configure(fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER)
+            self.disconnect_button.configure(fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER)
             self.sidebar_status.configure(text="Connected", fg_color="#14532D", text_color="#DCFCE7")
         else:
             self.connection_badge.configure(text="Disconnected", fg_color="#7F1D1D", text_color="#FEE2E2")
-            self.connect_button.configure(fg_color=WABASH_RED, hover_color=WABASH_RED_HOVER)
+            self.connect_button.configure(fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER)
             self.disconnect_button.configure(fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER)
             self.sidebar_status.configure(text="Disconnected", fg_color="#7F1D1D", text_color="#FEE2E2")
 
@@ -693,3 +693,4 @@ class MainWindow:
     def _on_close(self) -> None:
         self.serial_service.disconnect()
         self.root.destroy()
+

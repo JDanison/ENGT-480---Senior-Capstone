@@ -2,5 +2,6 @@ Metadata-Version: 2.4
 Name: wabash-interface
 Version: 0.1.0
 Summary: Desktop user interface for Wabash capstone transmitter/receiver system
-Requires-Python: >=3.11
+Requires-Python: >=3.10
+Requires-Dist: customtkinter>=5.2.2
 Requires-Dist: pyserial>=3.5

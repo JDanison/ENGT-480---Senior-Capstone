@@ -7,8 +7,7 @@ if not exist .venv (
 )
 
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-set PYTHONPATH=src
+.venv\Scripts\python.exe -m pip install -e .
 .venv\Scripts\python.exe -m wabash_interface.main
 
 endlocal

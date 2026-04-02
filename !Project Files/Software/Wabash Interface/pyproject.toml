@@ -6,8 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "wabash-interface"
 version = "0.1.0"
 description = "Desktop user interface for Wabash capstone transmitter/receiver system"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
+  "customtkinter>=5.2.2",
   "pyserial>=3.5",
 ]
 
