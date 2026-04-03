@@ -40,8 +40,7 @@ void restartLoRaReceive() {
   }
 }
 
-bool sendLoRaCommand(char command) {
-  String packet = "CMD:" + String(command);
+bool sendLoRaPacket(const String& packet) {
   int txState = loraRadio.transmit(packet.c_str());
   if (txState != RADIOLIB_ERR_NONE) {
     Serial.printf("LoRa TX failed (%d)\n", txState);
@@ -49,6 +48,15 @@ bool sendLoRaCommand(char command) {
   }
 
   Serial.printf("[TX] %s\n", packet.c_str());
+  restartLoRaReceive();
+  return true;
+}
+
+bool sendLoRaCommand(char command) {
+  String packet = "CMD:" + String(command);
+  if (!sendLoRaPacket(packet)) {
+    return false;
+  }
 
   if (command == 'd' || command == 'D') {
     dataTransferActive = true;
@@ -56,12 +64,15 @@ bool sendLoRaCommand(char command) {
     dataTransferBytes = 0;
     dataTransferLines = 0;
   }
-
-  restartLoRaReceive();
   return true;
 }
 
 void handleLoRaMessage(const String& packet) {
+  if (packet.startsWith("SETUP:")) {
+    Serial.printf("[SETUP_ACK] Setup echoed from receiver: %s\n", packet.c_str());
+    return;
+  }
+
   if (packet.startsWith("DATC:")) {
     String chunk = packet.substring(5);
     if (dataTransferActive) {
@@ -130,14 +141,28 @@ void processLoRaPackets() {
 }
 
 void processSerialInput() {
-  while (Serial.available() > 0) {
-    char command = Serial.read();
-    if (command == '\n' || command == '\r') {
-      continue;
-    }
-
-    sendLoRaCommand(command);
+  if (Serial.available() <= 0) {
+    return;
   }
+
+  String line = Serial.readStringUntil('\n');
+  line.trim();
+  if (line.length() == 0) {
+    return;
+  }
+
+  if (line.startsWith("SETUP:")) {
+    sendLoRaPacket(line);
+    return;
+  }
+
+  if (line.length() == 1) {
+    sendLoRaCommand(line.charAt(0));
+    return;
+  }
+
+  // Fallback: transmit arbitrary packet payload as-is.
+  sendLoRaPacket(line);
 }
 
 void setup() {

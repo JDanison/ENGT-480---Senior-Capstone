@@ -72,14 +72,16 @@
 // Serial Configuration
 #define SERIAL_BAUD_RATE    115200  // Serial monitor baud rate
 
-// Timing Configuration
-#define SENSOR_READ_INTERVAL 100    // Sensor reading interval in milliseconds (fast for demo)
-#define ACCEL_THRESHOLD      2.0    // Accelerometer threshold in g's
-#define EVENT_CAPTURE_DURATION_MS 2000 // Event capture window in milliseconds
-#define EVENT_MAX_SAMPLES      80      // Safety cap for paired accel+strain samples in one event
+// ===== CONFIGURABLE RUNTIME PARAMETERS (can be updated via CFG packets) =====
+// These are declared as extern globals and defined in main.cpp
+extern unsigned long SENSOR_READ_INTERVAL;      // Sensor reading interval in milliseconds
+extern float ACCEL_THRESHOLD;                   // Accelerometer threshold in g's
+extern unsigned long EVENT_CAPTURE_DURATION_MS; // Event capture window in milliseconds
+extern unsigned int LAB_TEST_SAMPLE_RATE_HZ;    // Lab test sampling rate (10 or 20 Hz)
+// ======================================================================
 
-// Lab Test Configuration
-#define LAB_TEST_SAMPLE_RATE_HZ  20  // Lab test sampling rate (10 or 20 Hz)
+// Timing Configuration (non-configurable)
+#define EVENT_MAX_SAMPLES      80      // Safety cap for paired accel+strain samples in one event
 
 // WiFi Configuration (for time sync)
 // NOTE: Update these with your WiFi credentials before deploying
@@ -118,6 +120,11 @@ void playbackEvents();
 bool syncTime();
 String getFormattedTime();
 void offloadData();
+
+// Configuration functions
+bool parseSetupPacket(const String& packet);
+bool saveTruckInfoToSd(const String& truckId, const String& description, bool includeTruckId, bool includeDescription);
+void applyConfiguration();
 
 // Legacy function prototypes (to be implemented)
 void decToHex(int decimal, char * hex);   // Conversion from Decimal to Hex

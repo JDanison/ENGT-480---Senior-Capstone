@@ -72,6 +72,16 @@ class MainWindow:
         self.text_scale_var = tk.DoubleVar(value=1.0)
         self.search_placeholder_active = False
 
+        # Unit Setup configuration variables
+        self.sensor_interval_var = tk.StringVar(value="100")
+        self.event_trigger_threshold_var = tk.StringVar(value="2.0")
+        self.lab_sample_rate_var = tk.StringVar(value="20")
+        self.event_duration_var = tk.StringVar(value="2000")
+        self.include_truck_id_var = tk.BooleanVar(value=False)
+        self.truck_id_var = tk.StringVar(value="")
+        self.include_description_var = tk.BooleanVar(value=False)
+        self.description_var = tk.StringVar(value="")
+
         self.pages: dict[str, ctk.CTkFrame] = {}
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
 
@@ -155,7 +165,16 @@ class MainWindow:
             hover_color=BTN_GREY_HOVER,
             command=lambda: self._show_page("Live Session"),
         )
-        self.nav_buttons["Live Session"].grid(row=3, column=0, sticky="ew", padx=16, pady=(4, 14))
+        self.nav_buttons["Live Session"].grid(row=3, column=0, sticky="ew", padx=16, pady=4)
+
+        self.nav_buttons["Unit Setup"] = ctk.CTkButton(
+            nav_card,
+            text="Unit Setup",
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=lambda: self._show_page("Unit Setup"),
+        )
+        self.nav_buttons["Unit Setup"].grid(row=4, column=0, sticky="ew", padx=16, pady=(4, 14))
 
         quick_status = ctk.CTkFrame(sidebar, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         quick_status.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
@@ -175,6 +194,7 @@ class MainWindow:
         self._build_dashboard_page()
         self._build_settings_page()
         self._build_live_page()
+        self._build_unit_setup_page()
 
     def _create_stat_card(self, parent: ctk.CTkFrame, column: int, title: str, initial: str) -> ctk.CTkLabel:
         card = ctk.CTkFrame(parent, corner_radius=12, fg_color=(CARD_LIGHT, CARD_DARK))
@@ -526,6 +546,10 @@ class MainWindow:
         self.log_text.configure(font=("Consolas", fs))
 
     def _highlight_search(self) -> None:
+        # Guard against callbacks during initialization before log_text is created
+        if not hasattr(self, 'log_text'):
+            return
+        
         inner: tk.Text = self.log_text._textbox  # type: ignore[attr-defined]
         inner.tag_remove("search_hl", "1.0", "end")
         term = self._effective_search_term()
@@ -689,6 +713,167 @@ class MainWindow:
 
         output = export_text_log(self.log_lines, Path(selected))
         messagebox.showinfo("Export Complete", f"Saved log to:\n{output}")
+
+    def _build_unit_setup_page(self) -> None:
+        page = ctk.CTkFrame(self.page_container, corner_radius=0, fg_color="transparent")
+        page.grid_columnconfigure(0, weight=1)
+        self.pages["Unit Setup"] = page
+
+        header = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        ctk.CTkLabel(header, text="Unit Configuration", font=ctk.CTkFont(size=22, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=18, pady=14
+        )
+
+        info_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        info_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        info_card.grid_columnconfigure(1, weight=1)
+
+        self.include_truck_id_cb = ctk.CTkCheckBox(
+            info_card,
+            text="Include Truck ID",
+            variable=self.include_truck_id_var,
+            onvalue=True,
+            offvalue=False,
+            fg_color=WABASH_BLUE,
+            hover_color=WABASH_BLUE_HOVER,
+        )
+        self.include_truck_id_cb.grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
+        ctk.CTkEntry(
+            info_card,
+            textvariable=self.truck_id_var,
+            placeholder_text="Truck ID",
+        ).grid(row=0, column=1, sticky="ew", padx=(6, 16), pady=(14, 6))
+
+        self.include_description_cb = ctk.CTkCheckBox(
+            info_card,
+            text="Include Description",
+            variable=self.include_description_var,
+            onvalue=True,
+            offvalue=False,
+            fg_color=WABASH_BLUE,
+            hover_color=WABASH_BLUE_HOVER,
+        )
+        self.include_description_cb.grid(row=1, column=0, sticky="w", padx=16, pady=(6, 14))
+        ctk.CTkEntry(
+            info_card,
+            textvariable=self.description_var,
+            placeholder_text="Description",
+        ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
+
+        config_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        config_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        config_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(config_card, text="Sensor Read Interval (ms)", text_color=("#475569", "#94A3B8")).grid(
+            row=0, column=0, sticky="w", padx=16, pady=(14, 6)
+        )
+        ctk.CTkOptionMenu(
+            config_card,
+            values=["50", "100", "200", "500"],
+            variable=self.sensor_interval_var,
+            fg_color=WABASH_BLUE,
+            button_color=WABASH_BLUE_HOVER,
+            button_hover_color=WABASH_BLUE_HOVER,
+        ).grid(row=0, column=1, sticky="ew", padx=(6, 16), pady=(14, 6))
+
+        ctk.CTkLabel(config_card, text="Strain Gauge Poll Rate (Hz)", text_color=("#475569", "#94A3B8")).grid(
+            row=1, column=0, sticky="w", padx=16, pady=6
+        )
+        ctk.CTkOptionMenu(
+            config_card,
+            values=["10", "20"],
+            variable=self.lab_sample_rate_var,
+            fg_color=WABASH_BLUE,
+            button_color=WABASH_BLUE_HOVER,
+            button_hover_color=WABASH_BLUE_HOVER,
+        ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=6)
+
+        ctk.CTkLabel(config_card, text="Event Trigger Threshold (g's)", text_color=("#475569", "#94A3B8")).grid(
+            row=2, column=0, sticky="w", padx=16, pady=6
+        )
+        ctk.CTkEntry(
+            config_card,
+            textvariable=self.event_trigger_threshold_var,
+            placeholder_text="Example: 2.0",
+        ).grid(row=2, column=1, sticky="ew", padx=(6, 16), pady=6)
+
+        ctk.CTkLabel(config_card, text="Event Capture Duration (ms)", text_color=("#475569", "#94A3B8")).grid(
+            row=3, column=0, sticky="w", padx=16, pady=(6, 14)
+        )
+        ctk.CTkEntry(
+            config_card,
+            textvariable=self.event_duration_var,
+            placeholder_text="Example: 2000",
+        ).grid(row=3, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
+
+        desc_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        desc_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        ctk.CTkLabel(
+            desc_card,
+            text="Truck ID and Description are optional and only sent when their checkbox is checked.",
+            wraplength=760,
+            text_color=("#334155", "#CBD5E1"),
+            font=ctk.CTkFont(size=12),
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=12)
+
+        ctk.CTkButton(
+            page,
+            text="Send Configuration",
+            command=self._send_unit_config,
+            fg_color=WABASH_BLUE,
+            hover_color=WABASH_BLUE_HOVER,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=40,
+        ).grid(row=4, column=0, sticky="ew")
+
+    def _send_unit_config(self) -> None:
+        if not self.serial_service.is_connected:
+            messagebox.showwarning("Not Connected", "Connect to a serial port first.")
+            return
+
+        try:
+            interval = int(self.sensor_interval_var.get().strip())
+            threshold = float(self.event_trigger_threshold_var.get().strip())
+            sample_rate = int(self.lab_sample_rate_var.get().strip())
+            duration = int(self.event_duration_var.get().strip())
+
+            include_truck = bool(self.include_truck_id_var.get())
+            include_desc = bool(self.include_description_var.get())
+
+            truck_id = self.truck_id_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
+            description = self.description_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
+
+            if include_truck and not truck_id:
+                messagebox.showwarning("Missing Truck ID", "Truck ID checkbox is enabled, but Truck ID is empty.")
+                return
+
+            if include_desc and not description:
+                messagebox.showwarning("Missing Description", "Description checkbox is enabled, but Description is empty.")
+                return
+
+            packet = (
+                f"SETUP:si={interval};thr={threshold};sr={sample_rate};dur={duration};"
+                f"ti={1 if include_truck else 0};tid={truck_id if include_truck else ''};"
+                f"di={1 if include_desc else 0};desc={description if include_desc else ''}"
+            )
+            wire_payload = f"{packet}\n"
+            self.serial_service.send_text(wire_payload)
+
+            messagebox.showinfo(
+                "Configuration Sent",
+                f"Unit configuration sent:\n\n"
+                f"Sensor Interval: {interval}ms\n"
+                f"Event Trigger Threshold: {threshold}g\n"
+                f"Strain Gauge Poll Rate: {sample_rate}Hz\n"
+                f"Event Duration: {duration}ms\n"
+                f"Truck ID Included: {'Yes' if include_truck else 'No'}\n"
+                f"Description Included: {'Yes' if include_desc else 'No'}"
+            )
+        except ValueError:
+            messagebox.showerror("Invalid Input", "Threshold and duration must be numeric values.")
+        except Exception as exc:
+            messagebox.showerror("Send Error", str(exc))
 
     def _on_close(self) -> None:
         self.serial_service.disconnect()

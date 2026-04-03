@@ -13,4 +13,4 @@ TODO Order:
 2) Customization inputs 
 3) Polishing the data offloading process
 4) Wi-Fi Mode
-5) Switch to Blue/White/Yellow
+5) Switch to Blue/White/Yellow - Done (4/2/26)

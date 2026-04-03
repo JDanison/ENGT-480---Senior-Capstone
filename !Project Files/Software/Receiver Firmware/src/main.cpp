@@ -27,6 +27,13 @@ SX1262 loraRadio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 
 volatile bool loraPacketReceived = false;
 
+// ===== CONFIGURABLE RUNTIME PARAMETERS =====
+unsigned long SENSOR_READ_INTERVAL = 100;       // Default: 100ms
+float ACCEL_THRESHOLD = 2.0;                    // Default: 2.0g
+unsigned long EVENT_CAPTURE_DURATION_MS = 2000; // Default: 2000ms
+unsigned int LAB_TEST_SAMPLE_RATE_HZ = 20;      // Default: 20Hz
+// ===========================================
+
 void processSerialCommand(char command);
 
 #if defined(ESP8266) || defined(ESP32)
@@ -122,6 +129,133 @@ bool streamStoredEventsOverLoRa() {
   return sentAnyLine;
 }
 
+bool saveTruckInfoToSd(const String& truckId, const String& description, bool includeTruckId, bool includeDescription) {
+  if (!includeTruckId && !includeDescription) {
+    return true;
+  }
+
+  if (!sdCard.isInitialized()) {
+    Serial.println("Truck info not saved: SD card not initialized.");
+    return false;
+  }
+
+  String content = "# Truck Info\n";
+  content += "updated=" + getFormattedTime() + "\n";
+  content += "include_truck_id=" + String(includeTruckId ? "1" : "0") + "\n";
+  content += "include_description=" + String(includeDescription ? "1" : "0") + "\n";
+  content += "truck_id=" + String(includeTruckId ? truckId : "") + "\n";
+  content += "description=" + String(includeDescription ? description : "") + "\n";
+
+  bool ok = sdCard.writeFile("/truck info/truck_id.txt", content.c_str(), false);
+  if (ok) {
+    Serial.println("Truck info saved: /truck info/truck_id.txt");
+  } else {
+    Serial.println("Truck info save failed.");
+  }
+  return ok;
+}
+
+bool parseSetupPacket(const String& packet) {
+  if (!packet.startsWith("SETUP:")) {
+    return false;
+  }
+
+  String data = packet.substring(6);
+  data.trim();
+
+  unsigned long nextInterval = SENSOR_READ_INTERVAL;
+  float nextThreshold = ACCEL_THRESHOLD;
+  unsigned int nextSampleRate = LAB_TEST_SAMPLE_RATE_HZ;
+  unsigned long nextDuration = EVENT_CAPTURE_DURATION_MS;
+  bool includeTruckId = false;
+  bool includeDescription = false;
+  String truckId = "";
+  String description = "";
+
+  int start = 0;
+  while (start < data.length()) {
+    int sep = data.indexOf(';', start);
+    if (sep < 0) {
+      sep = data.length();
+    }
+
+    String token = data.substring(start, sep);
+    int eq = token.indexOf('=');
+    if (eq > 0) {
+      String key = token.substring(0, eq);
+      String value = token.substring(eq + 1);
+      key.trim();
+      value.trim();
+
+      if (key == "si") {
+        unsigned long v = value.toInt();
+        if (v < 1 || v > 10000) {
+          Serial.println("ERROR: Sensor interval out of range (1-10000 ms)");
+          return false;
+        }
+        nextInterval = v;
+      } else if (key == "thr") {
+        float v = value.toFloat();
+        if (v <= 0.0f || v > 10.0f) {
+          Serial.println("ERROR: Event trigger threshold out of range (0-10 g]");
+          return false;
+        }
+        nextThreshold = v;
+      } else if (key == "sr") {
+        int v = value.toInt();
+        if (v != 10 && v != 20) {
+          Serial.println("ERROR: Sample rate must be 10 or 20 Hz");
+          return false;
+        }
+        nextSampleRate = (unsigned int)v;
+      } else if (key == "dur") {
+        unsigned long v = value.toInt();
+        if (v < 1 || v > 10000) {
+          Serial.println("ERROR: Event capture duration out of range (1-10000 ms)");
+          return false;
+        }
+        nextDuration = v;
+      } else if (key == "ti") {
+        includeTruckId = (value == "1");
+      } else if (key == "tid") {
+        truckId = value;
+      } else if (key == "di") {
+        includeDescription = (value == "1");
+      } else if (key == "desc") {
+        description = value;
+      }
+    }
+
+    start = sep + 1;
+  }
+
+  SENSOR_READ_INTERVAL = nextInterval;
+  ACCEL_THRESHOLD = nextThreshold;
+  LAB_TEST_SAMPLE_RATE_HZ = nextSampleRate;
+  EVENT_CAPTURE_DURATION_MS = nextDuration;
+
+  Serial.println("SETUP applied:");
+  Serial.printf("  SENSOR_READ_INTERVAL: %lu ms\n", SENSOR_READ_INTERVAL);
+  Serial.printf("  EVENT_TRIGGER_THRESHOLD: %.3f g\n", ACCEL_THRESHOLD);
+  Serial.printf("  LAB_TEST_SAMPLE_RATE_HZ: %u Hz\n", LAB_TEST_SAMPLE_RATE_HZ);
+  Serial.printf("  EVENT_CAPTURE_DURATION_MS: %lu ms\n", EVENT_CAPTURE_DURATION_MS);
+
+  if (!saveTruckInfoToSd(truckId, description, includeTruckId, includeDescription)) {
+    Serial.println("SETUP warning: truck info requested but not saved.");
+  }
+
+  return true;
+}
+
+/**
+ * Apply configuration (called after successful parsing)
+ * Can reconfigure I2C bus or other sensors here if needed
+ */
+void applyConfiguration() {
+  Serial.println("\n✓ Configuration applied successfully!");
+  Serial.println("Unit is now using new parameters.");
+}
+
 void handleLoRaCommandPacket(const String& packet) {
   if (!packet.startsWith("CMD:") || packet.length() != 5) {
     // Ignore malformed or unrelated packets to avoid serial spam.
@@ -158,6 +292,13 @@ void processLoRaPackets() {
     packet.trim();
     if (packet.startsWith("CMD:") && packet.length() == 5) {
       handleLoRaCommandPacket(packet);
+    } else if (packet.startsWith("SETUP:")) {
+      if (parseSetupPacket(packet)) {
+        applyConfiguration();
+        sendLoRaMessage("RSP:SETUP_OK");
+      } else {
+        sendLoRaMessage("RSP:SETUP_ERR");
+      }
     }
   } else {
     Serial.printf("LoRa RX read failed (%d)\n", rxState);
@@ -1005,8 +1146,28 @@ void loop() {
   // Handle incoming command packets from transmitter
   processLoRaPackets();
 
-  // Check for serial commands
+  // Check for serial commands and setup packets
   if (Serial.available() > 0) {
+    if (Serial.peek() == 'S') {
+      String setupLine = Serial.readStringUntil('\n');
+      setupLine.trim();
+
+      if (setupLine.startsWith("SETUP:")) {
+        if (parseSetupPacket(setupLine)) {
+          applyConfiguration();
+          sendLoRaMessage("RSP:SETUP_OK");
+        } else {
+          Serial.println("SETUP parse error");
+        }
+        return;
+      }
+
+      if (setupLine.length() == 1) {
+        processSerialCommand(setupLine.charAt(0));
+        return;
+      }
+    }
+
     char command = Serial.read();
     processSerialCommand(command);
   }
