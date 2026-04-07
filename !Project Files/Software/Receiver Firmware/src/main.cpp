@@ -34,6 +34,11 @@ unsigned long EVENT_CAPTURE_DURATION_MS = 2000; // Default: 2000ms
 unsigned int LAB_TEST_SAMPLE_RATE_HZ = 20;      // Default: 20Hz
 // ===========================================
 
+// ===== TRUCK IDENTITY (set via SETUP packet or loaded from SD) =====
+String g_truckId = "";
+bool g_includeTruckId = false;
+// ===================================================================
+
 void processSerialCommand(char command);
 
 #if defined(ESP8266) || defined(ESP32)
@@ -234,6 +239,12 @@ bool parseSetupPacket(const String& packet) {
   LAB_TEST_SAMPLE_RATE_HZ = nextSampleRate;
   EVENT_CAPTURE_DURATION_MS = nextDuration;
 
+  // Store truck identity in memory
+  g_includeTruckId = includeTruckId;
+  if (includeTruckId && truckId.length() > 0) {
+    g_truckId = truckId;
+  }
+
   Serial.println("SETUP applied:");
   Serial.printf("  SENSOR_READ_INTERVAL: %lu ms\n", SENSOR_READ_INTERVAL);
   Serial.printf("  EVENT_TRIGGER_THRESHOLD: %.3f g\n", ACCEL_THRESHOLD);
@@ -272,6 +283,16 @@ void handleLoRaCommandPacket(const String& packet) {
       sendLoRaMessage("RSP:NO_DATA");
     }
     sendLoRaMessage("END:D");
+    return;
+  }
+
+  if (command == 'n' || command == 'N') {
+    // Unit discovery scan response
+    if (g_includeTruckId && g_truckId.length() > 0) {
+      sendLoRaMessage("RSP:ID:" + g_truckId);
+    } else {
+      sendLoRaMessage("RSP:ID:UNNAMED");
+    }
     return;
   }
 
@@ -492,6 +513,35 @@ String getFormattedTime() {
   char buffer[64];
   strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S EST", &timeinfo);
   return String(buffer);
+}
+
+/**
+ * Load truck identity from SD card at startup
+ */
+void loadTruckInfoFromSd() {
+  if (!sdCard.isInitialized() || !sdCard.fileExists("/truck info/truck_id.txt")) {
+    return;
+  }
+  File f = SD.open("/truck info/truck_id.txt", FILE_READ);
+  if (!f) { return; }
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    line.trim();
+    if (line.startsWith("truck_id=")) {
+      String val = line.substring(9);
+      val.trim();
+      if (val.length() > 0) { g_truckId = val; }
+    } else if (line.startsWith("include_truck_id=")) {
+      String val2 = line.substring(17);
+      val2.trim();
+      g_includeTruckId = (val2 == "1");
+    }
+  }
+  f.close();
+  if (g_truckId.length() > 0) {
+    Serial.printf("Truck ID loaded: %s\n", g_truckId.c_str());
+  }
 }
 
 /**
@@ -729,6 +779,8 @@ void setup() {
   Serial.println();
   spiSD.begin(SDCARD_SCK, SDCARD_MISO, SDCARD_MOSI, SDCARD_CS);
   if (sdCard.begin()) {
+    // Load truck identity for LoRa discovery responses
+    loadTruckInfoFromSd();
     // Playback previous events
     playbackEvents();
   } else {

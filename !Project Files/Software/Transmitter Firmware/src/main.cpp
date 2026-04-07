@@ -111,6 +111,13 @@ void handleLoRaMessage(const String& packet) {
     return;
   }
 
+  if (packet.startsWith("RSP:ID:")) {
+    String truckId = packet.substring(7);
+    truckId.trim();
+    Serial.printf("[SCAN_RESULT]:%s\n", truckId.c_str());
+    return;
+  }
+
   if (packet.startsWith("RSP:")) {
     Serial.printf("[%s]\n", packet.c_str());
     return;
@@ -148,6 +155,11 @@ void processSerialInput() {
   String line = Serial.readStringUntil('\n');
   line.trim();
   if (line.length() == 0) {
+    return;
+  }
+
+  if (line == "SCAN") {
+    sendLoRaPacket("CMD:n");
     return;
   }
 

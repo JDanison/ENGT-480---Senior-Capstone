@@ -62,15 +62,21 @@ class MainWindow:
         self.rx_count = 0
         self.connected = False
         self.last_message = "No messages yet"
+        self.lora_active = False
+        self.session_events = 0
+        self.units: dict[str, dict] = {}
 
         self.port_var     = tk.StringVar(value="")
         self.baud_var     = tk.StringVar(value="115200")
         self.command_var  = tk.StringVar(value="")
         self.theme_var    = tk.StringVar(value="system")
         self.density_var  = tk.StringVar(value="Comfortable")
-        self.search_var   = tk.StringVar(value="")
-        self.text_scale_var = tk.DoubleVar(value=1.0)
+        self.search_var      = tk.StringVar(value="")
+        self.unit_filter_var = tk.StringVar(value="")
+        self.scan_var        = tk.StringVar(value="No units found")
+        self.text_scale_var  = tk.DoubleVar(value=1.0)
         self.search_placeholder_active = False
+        self._scan_results: list[str] = []
 
         # Unit Setup configuration variables
         self.sensor_interval_var = tk.StringVar(value="100")
@@ -118,7 +124,7 @@ class MainWindow:
         ctk.CTkLabel(
             sidebar,
             text="WABASH NATIONAL",
-            font=ctk.CTkFont(size=30, weight="bold"),
+            font=ctk.CTkFont(size=28, weight="bold"),
             text_color=WABASH_BLUE,
         ).grid(row=0, column=0, sticky="w", padx=24, pady=(28, 4))
         ctk.CTkLabel(
@@ -149,24 +155,6 @@ class MainWindow:
         )
         self.nav_buttons["Dashboard"].grid(row=1, column=0, sticky="ew", padx=16, pady=4)
 
-        self.nav_buttons["Settings"] = ctk.CTkButton(
-            nav_card,
-            text="Settings",
-            fg_color=BTN_GREY,
-            hover_color=BTN_GREY_HOVER,
-            command=lambda: self._show_page("Settings"),
-        )
-        self.nav_buttons["Settings"].grid(row=2, column=0, sticky="ew", padx=16, pady=4)
-
-        self.nav_buttons["Live Session"] = ctk.CTkButton(
-            nav_card,
-            text="Live Session",
-            fg_color=BTN_GREY,
-            hover_color=BTN_GREY_HOVER,
-            command=lambda: self._show_page("Live Session"),
-        )
-        self.nav_buttons["Live Session"].grid(row=3, column=0, sticky="ew", padx=16, pady=4)
-
         self.nav_buttons["Unit Setup"] = ctk.CTkButton(
             nav_card,
             text="Unit Setup",
@@ -174,7 +162,25 @@ class MainWindow:
             hover_color=BTN_GREY_HOVER,
             command=lambda: self._show_page("Unit Setup"),
         )
-        self.nav_buttons["Unit Setup"].grid(row=4, column=0, sticky="ew", padx=16, pady=(4, 14))
+        self.nav_buttons["Unit Setup"].grid(row=2, column=0, sticky="ew", padx=16, pady=4)
+
+        self.nav_buttons["Data Offload"] = ctk.CTkButton(
+            nav_card,
+            text="Data Offload",
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=lambda: self._show_page("Data Offload"),
+        )
+        self.nav_buttons["Data Offload"].grid(row=3, column=0, sticky="ew", padx=16, pady=4)
+
+        self.nav_buttons["Settings"] = ctk.CTkButton(
+            nav_card,
+            text="Settings",
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=lambda: self._show_page("Settings"),
+        )
+        self.nav_buttons["Settings"].grid(row=4, column=0, sticky="ew", padx=16, pady=(4, 14))
 
         quick_status = ctk.CTkFrame(sidebar, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         quick_status.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
@@ -225,45 +231,183 @@ class MainWindow:
         page.grid_rowconfigure(2, weight=1)
         self.pages["Dashboard"] = page
 
+        # ── Header ──────────────────────────────────────────────────────────
         header = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        header.grid(row=0, column=0, sticky="ew")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         header.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(header, text="System Dashboard", font=ctk.CTkFont(size=22, weight="bold")).grid(
+        ctk.CTkLabel(header, text="Fleet Dashboard", font=ctk.CTkFont(size=22, weight="bold")).grid(
             row=0, column=0, sticky="w", padx=18, pady=14
         )
-        ctk.CTkLabel(header, text="WABASH", text_color=WABASH_BLUE, font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=1, sticky="e", padx=18, pady=14
+        ctk.CTkLabel(
+            header, text="WABASH NATIONAL", text_color=WABASH_BLUE, font=ctk.CTkFont(size=14, weight="bold")
+        ).grid(row=0, column=1, sticky="e", padx=18, pady=14)
+
+        # ── System Status Cards ──────────────────────────────────────────────
+        status_row = ctk.CTkFrame(page, fg_color="transparent")
+        status_row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        status_row.grid_columnconfigure((0, 1, 2), weight=1)
+
+        tx_card = ctk.CTkFrame(status_row, corner_radius=12, fg_color=(CARD_LIGHT, CARD_DARK))
+        tx_card.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        tx_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            tx_card, text="Transmitter", text_color=("#64748B", "#94A3B8"), font=ctk.CTkFont(size=12)
+        ).grid(row=0, column=0, sticky="w", padx=14, pady=(10, 0))
+        self.db_tx_status = ctk.CTkLabel(
+            tx_card, text="Not Connected",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=("#EF4444", "#EF4444"),
         )
+        self.db_tx_status.grid(row=1, column=0, sticky="w", padx=14, pady=(2, 10))
 
-        cards = ctk.CTkFrame(page, fg_color="transparent")
-        cards.grid(row=1, column=0, sticky="ew", pady=(12, 12))
-        cards.grid_columnconfigure((0, 1, 2), weight=1)
+        lora_card = ctk.CTkFrame(status_row, corner_radius=12, fg_color=(CARD_LIGHT, CARD_DARK))
+        lora_card.grid(row=0, column=1, sticky="ew", padx=6)
+        lora_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            lora_card, text="Truck / LoRa Link", text_color=("#64748B", "#94A3B8"), font=ctk.CTkFont(size=12)
+        ).grid(row=0, column=0, sticky="w", padx=14, pady=(10, 0))
+        self.db_lora_status = ctk.CTkLabel(
+            lora_card, text="No Link",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=("#F59E0B", "#F59E0B"),
+        )
+        self.db_lora_status.grid(row=1, column=0, sticky="w", padx=14, pady=(2, 10))
 
-        self.db_connection = self._create_stat_card(cards, 0, "Connection", "Disconnected")
-        self.db_ports = self._create_stat_card(cards, 1, "Ports Detected", "0")
-        self.db_logs = self._create_stat_card(cards, 2, "Log Lines", "0")
+        sess_card = ctk.CTkFrame(status_row, corner_radius=12, fg_color=(CARD_LIGHT, CARD_DARK))
+        sess_card.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        sess_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            sess_card, text="Events This Session", text_color=("#64748B", "#94A3B8"), font=ctk.CTkFont(size=12)
+        ).grid(row=0, column=0, sticky="w", padx=14, pady=(10, 0))
+        self.db_event_count = ctk.CTkLabel(sess_card, text="0", font=ctk.CTkFont(size=22, weight="bold"))
+        self.db_event_count.grid(row=1, column=0, sticky="w", padx=14, pady=(2, 10))
 
-        cards2 = ctk.CTkFrame(page, fg_color="transparent")
-        cards2.grid(row=2, column=0, sticky="new")
-        cards2.grid_columnconfigure((0, 1, 2), weight=1)
+        # ── Main row: fleet table + active unit panel ────────────────────────
+        main_row = ctk.CTkFrame(page, fg_color="transparent")
+        main_row.grid(row=2, column=0, sticky="nsew", pady=(0, 12))
+        main_row.grid_columnconfigure(0, weight=1)
+        main_row.grid_rowconfigure(0, weight=1)
 
-        self.db_tx = self._create_stat_card(cards2, 0, "TX Count", "0")
-        self.db_rx = self._create_stat_card(cards2, 1, "RX Count", "0")
-        self.db_uptime = self._create_stat_card(cards2, 2, "Session Health", "Live")
+        # Fleet table (left)
+        fleet_card = ctk.CTkFrame(main_row, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        fleet_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        fleet_card.grid_columnconfigure(0, weight=1)
+        fleet_card.grid_rowconfigure(2, weight=1)
 
-        detail = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        detail.grid(row=3, column=0, sticky="ew")
-        detail.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(detail, text="Latest Message", font=ctk.CTkFont(size=16, weight="bold")).grid(
+        fleet_hdr = ctk.CTkFrame(fleet_card, fg_color="transparent")
+        fleet_hdr.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 6))
+        fleet_hdr.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(fleet_hdr, text="Known Units", font=ctk.CTkFont(size=16, weight="bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.unit_filter_entry = ctk.CTkEntry(
+            fleet_hdr, textvariable=self.unit_filter_var, placeholder_text="Filter by ID...", width=180
+        )
+        self.unit_filter_entry.grid(row=0, column=1, sticky="e")
+        self.unit_filter_var.trace_add("write", lambda *_: self._refresh_unit_list())
+
+        thead = ctk.CTkFrame(fleet_card, fg_color=("#E5E7EB", "#1E3050"), corner_radius=8)
+        thead.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 4))
+        thead.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        for col, lbl_text in enumerate(["Truck ID", "Last Seen", "Events", "Status"]):
+            ctk.CTkLabel(
+                thead, text=lbl_text,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=("#475569", "#94A3B8"),
+            ).grid(row=0, column=col, sticky="w", padx=10, pady=6)
+
+        self.fleet_scroll = ctk.CTkScrollableFrame(fleet_card, corner_radius=8, fg_color="transparent")
+        self.fleet_scroll.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 14))
+        self.fleet_scroll.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self.fleet_empty_label = ctk.CTkLabel(
+            self.fleet_scroll,
+            text="No units detected this session.\nConnect to a transmitter and offload data to populate this list.",
+            text_color=("#64748B", "#6B7280"),
+            font=ctk.CTkFont(size=13),
+            justify="center",
+        )
+        self.fleet_empty_label.grid(row=0, column=0, columnspan=4, pady=30)
+        self._fleet_rows: list = []
+
+        # Active unit panel (right)
+        unit_card = ctk.CTkFrame(main_row, width=260, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        unit_card.grid(row=0, column=1, sticky="nsew")
+        unit_card.grid_propagate(False)
+        unit_card.grid_columnconfigure(0, weight=1)
+        unit_card.grid_rowconfigure(12, weight=1)
+
+        ctk.CTkLabel(unit_card, text="Active Unit", font=ctk.CTkFont(size=16, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=16, pady=(14, 8)
+        )
+        ctk.CTkFrame(unit_card, height=1, fg_color=("#E5E7EB", "#1E3050")).grid(
+            row=1, column=0, sticky="ew", padx=16
+        )
+        self.db_unit_id = ctk.CTkLabel(
+            unit_card, text="No unit configured",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=("#64748B", "#9CA3AF"),
+            wraplength=220, justify="left",
+        )
+        self.db_unit_id.grid(row=2, column=0, sticky="w", padx=16, pady=(10, 2))
+        self.db_unit_desc = ctk.CTkLabel(
+            unit_card, text="",
+            font=ctk.CTkFont(size=12),
+            text_color=("#64748B", "#9CA3AF"),
+            wraplength=220, justify="left",
+        )
+        self.db_unit_desc.grid(row=3, column=0, sticky="w", padx=16, pady=(0, 4))
+
+        ctk.CTkFrame(unit_card, height=1, fg_color=("#E5E7EB", "#1E3050")).grid(
+            row=4, column=0, sticky="ew", padx=16, pady=(8, 0)
+        )
+        ctk.CTkLabel(
+            unit_card, text="Session Stats",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=("#475569", "#94A3B8"),
+        ).grid(row=5, column=0, sticky="w", padx=16, pady=(10, 4))
+
+        for stat_i, (stat_label, attr_name) in enumerate([
+            ("Lines Received", "db_rx_count"),
+            ("Commands Sent",  "db_tx_count"),
+            ("Log Lines",      "db_log_count"),
+        ]):
+            ctk.CTkLabel(
+                unit_card, text=stat_label,
+                font=ctk.CTkFont(size=11),
+                text_color=("#64748B", "#9CA3AF"),
+            ).grid(row=6 + stat_i * 2, column=0, sticky="w", padx=16, pady=(4, 0))
+            val_lbl = ctk.CTkLabel(unit_card, text="0", font=ctk.CTkFont(size=16, weight="bold"))
+            val_lbl.grid(row=7 + stat_i * 2, column=0, sticky="w", padx=16, pady=(0, 2))
+            setattr(self, attr_name, val_lbl)
+
+        ctk.CTkButton(
+            unit_card, text="Open Data Offload",
+            command=lambda: self._show_page("Data Offload"),
+            fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=13, column=0, sticky="ew", padx=16, pady=(0, 6))
+        ctk.CTkButton(
+            unit_card, text="Configure Unit",
+            command=lambda: self._show_page("Unit Setup"),
+            fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER,
+            font=ctk.CTkFont(size=13),
+        ).grid(row=14, column=0, sticky="ew", padx=16, pady=(0, 14))
+
+        # ── Latest message strip ─────────────────────────────────────────────
+        activity_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        activity_card.grid(row=3, column=0, sticky="ew")
+        activity_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(activity_card, text="Latest Message", font=ctk.CTkFont(size=14, weight="bold")).grid(
             row=0, column=0, sticky="w", padx=16, pady=(12, 4)
         )
         self.db_last_message = ctk.CTkLabel(
-            detail,
-            text=self.last_message,
+            activity_card,
+            text="No messages yet",
             wraplength=760,
             justify="left",
             anchor="w",
             text_color=("#334155", "#CBD5E1"),
+            font=ctk.CTkFont(size=12),
         )
         self.db_last_message.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
 
@@ -327,189 +471,266 @@ class MainWindow:
         ).grid(row=7, column=0, sticky="ew", padx=16, pady=(4, 14))
 
     def _build_live_page(self) -> None:
-        page = ctk.CTkFrame(self.page_container, corner_radius=0, fg_color="transparent")
+        page = ctk.CTkFrame(self.page_container, corner_radius=0, fg_color='transparent')
+        page.grid_columnconfigure(0, minsize=340)
         page.grid_columnconfigure(1, weight=1)
         page.grid_rowconfigure(0, weight=1)
-        self.pages["Live Session"] = page
+        self.pages['Data Offload'] = page
 
-        left_panel = ctk.CTkFrame(page, width=320, corner_radius=0, fg_color=("#E5E7EB", "#0B1220"))
-        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
-        left_panel.grid_propagate(False)
-        left_panel.grid_columnconfigure(0, weight=1)
+        # ================================================================
+        # LEFT PANEL
+        # ================================================================
+        left = ctk.CTkFrame(page, corner_radius=0,
+                            fg_color='transparent')
+        left.grid(row=0, column=0, sticky='nsew', padx=(0, 12))
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
 
-        content = ctk.CTkFrame(page, corner_radius=0, fg_color="transparent")
-        content.grid(row=0, column=1, sticky="nsew")
-        content.grid_columnconfigure(0, weight=1)
-        content.grid_rowconfigure(2, weight=1)
+        # Section 1: Transmitter connection
+        conn_card = ctk.CTkFrame(left, corner_radius=14,
+                                 fg_color=(CARD_LIGHT, CARD_DARK))
+        conn_card.grid(row=0, column=0, sticky='ew', padx=12, pady=(0, 8))
+        conn_card.grid_columnconfigure(0, weight=1)
 
-        connection_card = ctk.CTkFrame(left_panel, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        connection_card.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 12))
-        connection_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(conn_card, text='Transmitter',
+                     font=ctk.CTkFont(size=14, weight='bold')).grid(
+            row=0, column=0, columnspan=2, sticky='w', padx=14, pady=(12, 6))
 
-        ctk.CTkLabel(connection_card, text="Connection", font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=16, pady=(14, 6)
-        )
+        ctk.CTkLabel(conn_card, text='COM Port',
+                     text_color=('#475569', '#94A3B8')).grid(
+            row=1, column=0, columnspan=2, sticky='w', padx=14)
+        self.port_combo = ctk.CTkComboBox(conn_card, variable=self.port_var,
+                                          values=['No ports found'])
+        self.port_combo.grid(row=2, column=0, columnspan=2, sticky='ew',
+                             padx=14, pady=(4, 6))
 
-        ctk.CTkLabel(connection_card, text="COM Port", text_color=("#475569", "#94A3B8")).grid(
-            row=1, column=0, sticky="w", padx=16
-        )
-        self.port_combo = ctk.CTkComboBox(connection_card, variable=self.port_var, values=["No ports found"])
-        self.port_combo.grid(row=2, column=0, sticky="ew", padx=16, pady=(4, 10))
+        ctk.CTkLabel(conn_card, text='Baud',
+                     text_color=('#475569', '#94A3B8')).grid(
+            row=3, column=0, columnspan=2, sticky='w', padx=14)
+        ctk.CTkEntry(conn_card, textvariable=self.baud_var).grid(
+            row=4, column=0, columnspan=2, sticky='ew', padx=14, pady=(4, 8))
 
-        ctk.CTkLabel(connection_card, text="Baud", text_color=("#475569", "#94A3B8")).grid(
-            row=3, column=0, sticky="w", padx=16
-        )
-        ctk.CTkEntry(connection_card, textvariable=self.baud_var).grid(row=4, column=0, sticky="ew", padx=16, pady=(4, 12))
-
-        action_row = ctk.CTkFrame(connection_card, fg_color="transparent")
-        action_row.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 12))
-        action_row.grid_columnconfigure((0, 1, 2), weight=1)
-
-        ctk.CTkButton(action_row, text="Refresh", command=self._refresh_ports, fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER).grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        btn_row = ctk.CTkFrame(conn_card, fg_color='transparent')
+        btn_row.grid(row=5, column=0, columnspan=2, sticky='ew',
+                     padx=14, pady=(0, 12))
+        btn_row.grid_columnconfigure((0, 1, 2), weight=1)
+        ctk.CTkButton(btn_row, text='Refresh',
+                      fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER,
+                      command=self._refresh_ports).grid(
+            row=0, column=0, padx=(0, 3), sticky='ew')
         self.connect_button = ctk.CTkButton(
-            action_row,
-            text="Connect",
-            command=self._connect,
-            fg_color=WABASH_BLUE,
-            hover_color=WABASH_BLUE_HOVER,
-        )
-        self.connect_button.grid(row=0, column=1, padx=3, sticky="ew")
+            btn_row, text='Connect',
+            fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER,
+            command=self._connect)
+        self.connect_button.grid(row=0, column=1, padx=3, sticky='ew')
         self.disconnect_button = ctk.CTkButton(
-            action_row,
-            text="Disconnect",
-            command=self._disconnect,
-            fg_color=BTN_GREY,
-            hover_color=BTN_GREY_HOVER,
-        )
-        self.disconnect_button.grid(row=0, column=2, padx=(6, 0), sticky="ew")
+            btn_row, text='Disconnect',
+            fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER,
+            command=self._disconnect)
+        self.disconnect_button.grid(row=0, column=2, padx=(3, 0), sticky='ew')
 
-        quick_card = ctk.CTkFrame(left_panel, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        quick_card.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
-        quick_card.grid_columnconfigure((0, 1), weight=1)
+        # Section 2: Unit Discovery + table (fills remaining height)
+        disc_card = ctk.CTkFrame(left, corner_radius=14,
+                                 fg_color=(CARD_LIGHT, CARD_DARK))
+        disc_card.grid(row=1, column=0, sticky='nsew', padx=12, pady=(0, 8))
+        disc_card.grid_columnconfigure(0, weight=1)
+        disc_card.grid_rowconfigure(2, weight=1)
 
-        ctk.CTkLabel(quick_card, text="Quick Commands", font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 8)
-        )
-        ctk.CTkButton(quick_card, text="Request Data  d", command=lambda: self._send_quick("d"), fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(
-            row=1, column=0, padx=(16, 6), pady=5, sticky="ew"
-        )
-        ctk.CTkButton(quick_card, text="Tare  z", command=lambda: self._send_quick("z"), fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(
-            row=1, column=1, padx=(6, 16), pady=5, sticky="ew"
-        )
-        ctk.CTkButton(quick_card, text="Monitor  m", command=lambda: self._send_quick("m"), fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(
-            row=2, column=0, padx=(16, 6), pady=5, sticky="ew"
-        )
-        ctk.CTkButton(quick_card, text="Time Sync  s", command=lambda: self._send_quick("s"), fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(
-            row=2, column=1, padx=(6, 16), pady=5, sticky="ew"
-        )
+        disc_hdr = ctk.CTkFrame(disc_card, fg_color='transparent')
+        disc_hdr.grid(row=0, column=0, sticky='ew', padx=14, pady=(12, 8))
+        disc_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(disc_hdr, text='Unit Discovery',
+                     font=ctk.CTkFont(size=14, weight='bold')).grid(
+            row=0, column=0, sticky='w')
+        self.scan_button = ctk.CTkButton(
+            disc_hdr, text='Unit Discover', width=110,
+            fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER,
+            command=self._run_connection_scan)
+        self.scan_button.grid(row=0, column=1, sticky='e')
 
-        top_bar = ctk.CTkFrame(content, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        top_bar.grid(row=0, column=0, sticky="ew")
-        top_bar.grid_columnconfigure(1, weight=1)
+        # Table column header
+        thead = ctk.CTkFrame(disc_card, fg_color=('#D1D5DB', '#1E3050'),
+                             corner_radius=6)
+        thead.grid(row=1, column=0, sticky='ew', padx=14, pady=(0, 2))
+        thead.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(thead, text='Truck ID',
+                     font=ctk.CTkFont(size=11, weight='bold'),
+                     text_color=('#475569', '#94A3B8')).grid(
+            row=0, column=0, sticky='w', padx=10, pady=5)
+        ctk.CTkLabel(thead, text='Select',
+                     font=ctk.CTkFont(size=11, weight='bold'),
+                     text_color=('#475569', '#94A3B8')).grid(
+            row=0, column=1, sticky='e', padx=10, pady=5)
 
-        ctk.CTkLabel(top_bar, text="Live Session", font=ctk.CTkFont(size=20, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=18, pady=14
-        )
+        # Scrollable table body
+        self.disc_scroll = ctk.CTkScrollableFrame(
+            disc_card, corner_radius=6, fg_color='transparent')
+        self.disc_scroll.grid(row=2, column=0, sticky='nsew', padx=14,
+                              pady=(0, 12))
+        self.disc_scroll.grid_columnconfigure(0, weight=1)
+        self.disc_empty_label = ctk.CTkLabel(
+            self.disc_scroll,
+            text='No units found.\nPress Unit Discover to scan.',
+            text_color=('#64748B', '#6B7280'),
+            font=ctk.CTkFont(size=12), justify='center')
+        self.disc_empty_label.grid(row=0, column=0, columnspan=2, pady=20)
+        self._disc_rows: list = []
 
-        ctk.CTkLabel(top_bar, text="WABASH", text_color=WABASH_BLUE, font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=1, sticky="e", padx=(10, 170), pady=14
-        )
+        # Section 3: Unit Actions (locked until a unit is selected)
+        act_card = ctk.CTkFrame(left, corner_radius=14,
+                                fg_color=(CARD_LIGHT, CARD_DARK))
+        act_card.grid(row=2, column=0, sticky='ew', padx=12, pady=(0, 0))
+        act_card.grid_columnconfigure((0, 1, 2), weight=1)
 
+        ctk.CTkLabel(act_card, text='Unit Actions',
+                     font=ctk.CTkFont(size=14, weight='bold')).grid(
+            row=0, column=0, columnspan=3, sticky='w', padx=14, pady=(12, 8))
+
+        self.btn_request = ctk.CTkButton(
+            act_card, text='Request Data',
+            fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER,
+            state='disabled',
+            command=lambda: self._send_quick('d'))
+        self.btn_request.grid(row=1, column=0, padx=(14, 4), pady=(0, 12),
+                              sticky='ew')
+        self.btn_tare = ctk.CTkButton(
+            act_card, text='Unit Tare',
+            fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER,
+            state='disabled',
+            command=lambda: self._send_quick('z'))
+        self.btn_tare.grid(row=1, column=1, padx=4, pady=(0, 12), sticky='ew')
+        self.btn_timesync = ctk.CTkButton(
+            act_card, text='Time Sync',
+            fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER,
+            state='disabled',
+            command=lambda: self._send_quick('s'))
+        self.btn_timesync.grid(row=1, column=2, padx=(4, 14), pady=(0, 12),
+                               sticky='ew')
+
+        # ================================================================
+        # RIGHT PANEL
+        # ================================================================
+        right = ctk.CTkFrame(page, corner_radius=0, fg_color='transparent')
+        right.grid(row=0, column=1, sticky='nsew')
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+
+        # Header bar (title + connection badge)
+        hdr = ctk.CTkFrame(right, corner_radius=14,
+                           fg_color=(CARD_LIGHT, CARD_DARK))
+        hdr.grid(row=0, column=0, sticky='ew', pady=(0, 10))
+        hdr.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(hdr, text='Data Offload',
+                     font=ctk.CTkFont(size=22, weight='bold')).grid(
+            row=0, column=0, sticky='w', padx=18, pady=14)
+        ctk.CTkLabel(hdr, text='WABASH',
+                     text_color=WABASH_BLUE,
+                     font=ctk.CTkFont(size=16, weight='bold')).grid(
+            row=0, column=1, sticky='e', padx=(10, 180), pady=14)
         self.connection_badge = ctk.CTkLabel(
-            top_bar,
-            text="Disconnected",
+            hdr, text='Disconnected',
             corner_radius=10,
-            fg_color="#7F1D1D",
-            text_color="#FEE2E2",
-            width=140,
-        )
-        self.connection_badge.grid(row=0, column=1, sticky="e", padx=(10, 18), pady=14)
+            fg_color='#7F1D1D', text_color='#FEE2E2', width=154)
+        self.connection_badge.grid(row=0, column=1, sticky='e',
+                                   padx=(10, 18), pady=14)
 
-        stats = ctk.CTkFrame(content, fg_color="transparent")
-        stats.grid(row=1, column=0, sticky="ew", pady=(12, 12))
+        # Stats row
+        stats = ctk.CTkFrame(right, fg_color='transparent')
+        stats.grid(row=1, column=0, sticky='ew', pady=(0, 10))
         stats.grid_columnconfigure((0, 1, 2), weight=1)
+        self.port_stat = self._create_stat_card(stats, 0, 'Port', '-')
+        self.tx_stat   = self._create_stat_card(stats, 1, 'TX', '0')
+        self.rx_stat   = self._create_stat_card(stats, 2, 'RX', '0')
 
-        self.port_stat = self._create_stat_card(stats, 0, "Port", "-")
-        self.tx_stat = self._create_stat_card(stats, 1, "TX", "0")
-        self.rx_stat = self._create_stat_card(stats, 2, "RX", "0")
-
-        log_card = ctk.CTkFrame(content, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        log_card.grid(row=2, column=0, sticky="nsew")
+        # Log card
+        log_card = ctk.CTkFrame(right, corner_radius=14,
+                                fg_color=(CARD_LIGHT, CARD_DARK))
+        log_card.grid(row=2, column=0, sticky='nsew')
         log_card.grid_columnconfigure(0, weight=1)
         log_card.grid_rowconfigure(2, weight=1)
 
-        log_header = ctk.CTkFrame(log_card, fg_color="transparent")
-        log_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 0))
-        log_header.grid_columnconfigure(1, weight=1)
+        log_hdr = ctk.CTkFrame(log_card, fg_color='transparent')
+        log_hdr.grid(row=0, column=0, sticky='ew', padx=16, pady=(14, 0))
+        log_hdr.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(log_hdr, text='Session Log',
+                     font=ctk.CTkFont(size=16, weight='bold')).grid(
+            row=0, column=0, sticky='w')
 
-        ctk.CTkLabel(log_header, text="Session Log", font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=0, sticky="w"
-        )
-
-        search_frame = ctk.CTkFrame(log_header, fg_color=("#E5E7EB", "#374151"), corner_radius=8)
-        search_frame.grid(row=0, column=1, sticky="e")
+        search_frame = ctk.CTkFrame(log_hdr, fg_color=('#E5E7EB', '#374151'),
+                                    corner_radius=8)
+        search_frame.grid(row=0, column=1, sticky='e')
         search_frame.grid_columnconfigure(0, weight=1)
-
         self.search_entry = ctk.CTkEntry(
             search_frame,
             textvariable=self.search_var,
             border_width=0,
-            fg_color=("#F8FAFC", "#374151"),
-            text_color=("#0F172A", "#F3F4F6"),
+            fg_color=('#F8FAFC', '#374151'),
+            text_color=('#0F172A', '#F3F4F6'),
             font=ctk.CTkFont(size=14),
-            width=220,
-        )
-        self.search_entry.grid(row=0, column=0, padx=(8, 4), pady=4, sticky="ew")
-
-        self.search_var.trace_add("write", lambda *_: self._on_search_change())
-        self.search_entry.bind("<FocusIn>", lambda _event: self._on_search_focus_in())
-        self.search_entry.bind("<FocusOut>", lambda _event: self._on_search_focus_out())
-
+            width=200)
+        self.search_entry.grid(row=0, column=0, padx=(8, 4), pady=4,
+                               sticky='ew')
+        self.search_var.trace_add('write', lambda *_: self._on_search_change())
+        self.search_entry.bind('<FocusIn>',
+                               lambda _e: self._on_search_focus_in())
+        self.search_entry.bind('<FocusOut>',
+                               lambda _e: self._on_search_focus_out())
         ctk.CTkButton(
-            search_frame, text="âœ•", width=28, height=28,
-            fg_color="transparent", hover_color=("#D1D5DB", "#4B5563"),
-            command=self._clear_search,
-        ).grid(row=0, column=1, padx=(0, 4))
-
+            search_frame, text='X', width=28, height=28,
+            fg_color='transparent', hover_color=('#D1D5DB', '#4B5563'),
+            command=self._clear_search).grid(row=0, column=1, padx=(0, 4))
         self._activate_search_placeholder()
 
-        legend = ctk.CTkFrame(log_card, fg_color="transparent")
-        legend.grid(row=1, column=0, sticky="w", padx=16, pady=(6, 4))
-        for label, colour in [("TX", LOG_COLORS["tx"]), ("RX", LOG_COLORS["rx"]),
-                              ("Data", LOG_COLORS["data"]), ("Status", LOG_COLORS["status"])]:
-            dot = ctk.CTkLabel(legend, text="â—", text_color=colour, width=18, font=ctk.CTkFont(size=10))
-            dot.pack(side="left")
-            ctk.CTkLabel(legend, text=label, text_color=("#475569", "#94A3B8"), font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 12))
+        legend = ctk.CTkFrame(log_card, fg_color='transparent')
+        legend.grid(row=1, column=0, sticky='w', padx=16, pady=(6, 4))
+        for lbl, col in [('TX', LOG_COLORS['tx']), ('RX', LOG_COLORS['rx']),
+                          ('Data', LOG_COLORS['data']),
+                          ('Status', LOG_COLORS['status'])]:
+            ctk.CTkLabel(legend, text='*', text_color=col, width=14,
+                         font=ctk.CTkFont(size=9)).pack(side='left')
+            ctk.CTkLabel(legend, text=lbl, text_color=('#475569', '#94A3B8'),
+                         font=ctk.CTkFont(size=11)).pack(side='left',
+                                                         padx=(0, 12))
 
-        self.log_text = ctk.CTkTextbox(log_card, wrap="none", corner_radius=10, font=("Consolas", 12))
-        self.log_text.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 14))
-
+        self.log_text = ctk.CTkTextbox(log_card, wrap='none', corner_radius=10,
+                                       font=('Consolas', 12))
+        self.log_text.grid(row=2, column=0, sticky='nsew', padx=16,
+                           pady=(0, 14))
         inner: tk.Text = self.log_text._textbox  # type: ignore[attr-defined]
         for tag, colour in LOG_COLORS.items():
             inner.tag_configure(tag, foreground=colour)
-        inner.tag_configure("search_hl", background=WABASH_BLUE, foreground="white")
+        inner.tag_configure('search_hl', background=WABASH_BLUE,
+                            foreground='white')
 
-        bottom = ctk.CTkFrame(content, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        bottom.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        # Bottom bar: custom command + log tools
+        bottom = ctk.CTkFrame(right, corner_radius=14,
+                              fg_color=(CARD_LIGHT, CARD_DARK))
+        bottom.grid(row=3, column=0, sticky='ew', pady=(10, 0))
         bottom.grid_columnconfigure(0, weight=1)
 
-        command_row = ctk.CTkFrame(bottom, fg_color="transparent")
-        command_row.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
-        command_row.grid_columnconfigure(0, weight=1)
+        cmd_r = ctk.CTkFrame(bottom, fg_color='transparent')
+        cmd_r.grid(row=0, column=0, sticky='ew', padx=14, pady=(14, 8))
+        cmd_r.grid_columnconfigure(0, weight=1)
+        self.command_entry = ctk.CTkEntry(
+            cmd_r, textvariable=self.command_var,
+            placeholder_text='Type custom command and press Send')
+        self.command_entry.grid(row=0, column=0, sticky='ew')
+        ctk.CTkButton(cmd_r, text='Send', width=110,
+                      fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER,
+                      command=self._send_custom).grid(row=0, column=1,
+                                                      padx=(10, 0))
 
-        self.command_entry = ctk.CTkEntry(command_row, textvariable=self.command_var, placeholder_text="Type custom command and press Send")
-        self.command_entry.grid(row=0, column=0, sticky="ew")
-        ctk.CTkButton(command_row, text="Send", width=110, command=self._send_custom, fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER).grid(row=0, column=1, padx=(10, 0))
-
-        button_row = ctk.CTkFrame(bottom, fg_color="transparent")
-        button_row.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
-        button_row.grid_columnconfigure((0, 1), weight=1)
-        ctk.CTkButton(button_row, text="Clear Log", fg_color=BTN_GREY, hover_color="#64748B", command=self._clear_log).grid(
-            row=0, column=0, padx=(0, 6), sticky="ew"
-        )
-        ctk.CTkButton(button_row, text="Export Log", fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER, command=self._export_log).grid(
-            row=0, column=1, padx=(6, 0), sticky="ew"
-        )
+        log_btns = ctk.CTkFrame(bottom, fg_color='transparent')
+        log_btns.grid(row=1, column=0, sticky='ew', padx=14, pady=(0, 14))
+        log_btns.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkButton(log_btns, text='Clear Log',
+                      fg_color=BTN_GREY, hover_color='#64748B',
+                      command=self._clear_log).grid(
+            row=0, column=0, padx=(0, 6), sticky='ew')
+        ctk.CTkButton(log_btns, text='Export Log',
+                      fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER,
+                      command=self._export_log).grid(
+            row=0, column=1, padx=(6, 0), sticky='ew')
 
     def _set_theme(self, mode: str) -> None:
         ctk.set_appearance_mode(mode)
@@ -586,8 +807,6 @@ class MainWindow:
         if self.serial_service.is_connected:
             self.port_stat.configure(text=current_port if current_port else "-")
 
-        self.db_ports.configure(text=str(0 if ports == ["No ports found"] else len(ports)))
-
     def _connect(self) -> None:
         port = self.port_var.get().strip()
         if not port or port == "No ports found":
@@ -618,14 +837,18 @@ class MainWindow:
             self.connect_button.configure(fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER)
             self.disconnect_button.configure(fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER)
             self.sidebar_status.configure(text="Connected", fg_color="#14532D", text_color="#DCFCE7")
+            self.db_tx_status.configure(text="Connected", text_color=("#22C55E", "#22C55E"))
         else:
             self.connection_badge.configure(text="Disconnected", fg_color="#7F1D1D", text_color="#FEE2E2")
             self.connect_button.configure(fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER)
             self.disconnect_button.configure(fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER)
             self.sidebar_status.configure(text="Disconnected", fg_color="#7F1D1D", text_color="#FEE2E2")
+            self.db_tx_status.configure(text="Not Connected", text_color=("#EF4444", "#EF4444"))
+            self.lora_active = False
+            self.db_lora_status.configure(text="No Link", text_color=("#F59E0B", "#F59E0B"))
 
         self.port_stat.configure(text=port_text)
-        self.db_connection.configure(text="Connected" if is_connected else "Disconnected")
+        self._update_active_unit_display()
 
     def _send_quick(self, command: str) -> None:
         self._send_payload(command)
@@ -675,17 +898,36 @@ class MainWindow:
         else:
             self.rx_count += 1
             self.rx_stat.configure(text=str(self.rx_count))
+            # Detect LoRa link from any receiver response
+            if not self.lora_active and (
+                line.startswith("RSP:") or line.startswith("DATA:")
+                or line.startswith("DATC:") or line.startswith("END:")
+            ):
+                self.lora_active = True
+                self.db_lora_status.configure(text="Link Active", text_color=("#22C55E", "#22C55E"))
+            # Collect Connection Scan results
+            if line.startswith("[SCAN_RESULT]:"):
+                truck_id = line[14:].strip()
+                if truck_id and truck_id not in self._scan_results:
+                    self._scan_results.append(truck_id)
 
-        self.db_tx.configure(text=str(self.tx_count))
-        self.db_rx.configure(text=str(self.rx_count))
-        self.db_logs.configure(text=str(len(self.log_lines)))
+        # Each END:D marks a completed data offload from the receiver
+        if line.startswith("END:D"):
+            self.session_events += 1
+            self.db_event_count.configure(text=str(self.session_events))
+            if self.include_truck_id_var.get() and self.truck_id_var.get().strip():
+                self._register_unit(self.truck_id_var.get().strip())
+
+        self.db_tx_count.configure(text=str(self.tx_count))
+        self.db_rx_count.configure(text=str(self.rx_count))
+        self.db_log_count.configure(text=str(len(self.log_lines)))
         self.db_last_message.configure(text=self.last_message)
 
     def _pump_messages(self) -> None:
         while not self.serial_service.messages.empty():
             line = self.serial_service.messages.get_nowait()
             self._append_log(line)
-        self.db_uptime.configure(text="Active" if self.connected else "Standby")
+        self._update_active_unit_display()
         self.root.after(100, self._pump_messages)
 
     def _clear_log(self) -> None:
@@ -693,11 +935,13 @@ class MainWindow:
         self.log_text.delete("1.0", "end")
         self.tx_count = 0
         self.rx_count = 0
+        self.session_events = 0
         self.tx_stat.configure(text="0")
         self.rx_stat.configure(text="0")
-        self.db_tx.configure(text="0")
-        self.db_rx.configure(text="0")
-        self.db_logs.configure(text="0")
+        self.db_tx_count.configure(text="0")
+        self.db_rx_count.configure(text="0")
+        self.db_log_count.configure(text="0")
+        self.db_event_count.configure(text="0")
         self.db_last_message.configure(text="No messages yet")
         self.search_var.set("")
         self._activate_search_placeholder()
@@ -874,6 +1118,123 @@ class MainWindow:
             messagebox.showerror("Invalid Input", "Threshold and duration must be numeric values.")
         except Exception as exc:
             messagebox.showerror("Send Error", str(exc))
+
+    def _update_active_unit_display(self) -> None:
+        """Refresh the Active Unit panel on the dashboard from Unit Setup values."""
+        if self.include_truck_id_var.get() and self.truck_id_var.get().strip():
+            tid = self.truck_id_var.get().strip()
+            self.db_unit_id.configure(text=tid, text_color=("#1E293B", "#E2E8F0"))
+            if self.include_description_var.get() and self.description_var.get().strip():
+                self.db_unit_desc.configure(text=self.description_var.get().strip())
+            else:
+                self.db_unit_desc.configure(text="No description set")
+        else:
+            self.db_unit_id.configure(text="No unit configured", text_color=("#64748B", "#9CA3AF"))
+            self.db_unit_desc.configure(text="")
+
+    def _register_unit(self, truck_id: str) -> None:
+        """Add or update a unit in the fleet registry and refresh the table."""
+        import datetime
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        if truck_id in self.units:
+            self.units[truck_id]["last_seen"] = now
+            self.units[truck_id]["events"] += 1
+            self.units[truck_id]["status"] = "Active"
+        else:
+            self.units[truck_id] = {
+                "truck_id": truck_id,
+                "last_seen": now,
+                "events": 1,
+                "status": "Active",
+            }
+        self._refresh_unit_list()
+
+    def _refresh_unit_list(self) -> None:
+        """Rebuild the fleet table rows, applying the current filter."""
+        for row_widgets in self._fleet_rows:
+            for w in row_widgets:
+                w.destroy()
+        self._fleet_rows.clear()
+
+        term = self.unit_filter_var.get().strip().lower()
+        units = [u for u in self.units.values() if not term or term in u["truck_id"].lower()]
+
+        if not units:
+            self.fleet_empty_label.grid(row=0, column=0, columnspan=4, pady=30)
+            return
+
+        self.fleet_empty_label.grid_remove()
+        for i, unit in enumerate(units):
+            cols: list[ctk.CTkLabel] = []
+            for col, text in enumerate([unit["truck_id"], unit["last_seen"], str(unit["events"]), unit["status"]]):
+                lbl = ctk.CTkLabel(
+                    self.fleet_scroll, text=text,
+                    font=ctk.CTkFont(size=12),
+                    text_color=("#1E293B", "#E2E8F0"),
+                    anchor="w",
+                )
+                lbl.grid(row=i, column=col, sticky="ew", padx=10, pady=4)
+                cols.append(lbl)
+            self._fleet_rows.append(cols)
+
+    def _run_connection_scan(self) -> None:
+        if not self.serial_service.is_connected:
+            messagebox.showwarning("Not Connected", "Connect to a transmitter first.")
+            return
+        self._scan_results.clear()
+        self.scan_button.configure(text="Scanning...", state="disabled")
+        self._clear_disc_table()
+        self.disc_empty_label.configure(text="Scanning for units...")
+        self._send_payload("SCAN")
+        self.root.after(3000, self._finish_connection_scan)
+
+    def _finish_connection_scan(self) -> None:
+        self.scan_button.configure(text="Unit Discover", state="normal")
+        if self._scan_results:
+            self._refresh_disc_table()
+        else:
+            self.disc_empty_label.configure(
+                text="No units found.\nPress Unit Discover to scan.")
+            self.disc_empty_label.grid(row=0, column=0, columnspan=2, pady=20)
+
+    def _clear_disc_table(self) -> None:
+        for row_widgets in self._disc_rows:
+            for w in row_widgets:
+                w.destroy()
+        self._disc_rows.clear()
+        self.disc_empty_label.grid(row=0, column=0, columnspan=2, pady=20)
+
+    def _refresh_disc_table(self) -> None:
+        self._clear_disc_table()
+        self.disc_empty_label.grid_forget()
+        self.disc_scroll.grid_columnconfigure(0, weight=1)
+        for idx, unit_id in enumerate(self._scan_results):
+            bg = (CARD_LIGHT, CARD_DARK) if idx % 2 == 0 else ('#F1F5F9', '#1E3050')
+            row_frame = ctk.CTkFrame(self.disc_scroll, corner_radius=6,
+                                     fg_color=bg)
+            row_frame.grid(row=idx, column=0, sticky='ew', pady=2)
+            row_frame.grid_columnconfigure(0, weight=1)
+            lbl = ctk.CTkLabel(row_frame, text=unit_id,
+                               font=ctk.CTkFont(size=13))
+            lbl.grid(row=0, column=0, sticky='w', padx=10, pady=6)
+            sel_btn = ctk.CTkButton(
+                row_frame, text='Select', width=70,
+                fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER,
+                command=lambda uid=unit_id: self._select_scanned_unit(uid))
+            sel_btn.grid(row=0, column=1, padx=(4, 10), pady=6)
+            self._disc_rows.append([row_frame])
+
+    def _select_scanned_unit(self, unit_id: str) -> None:
+        self.truck_id_var.set(unit_id)
+        self.include_truck_id_var.set(True)
+        self._update_active_unit_display()
+        self._register_unit(unit_id)
+        # Enable unit action buttons
+        for btn in (self.btn_request, self.btn_tare, self.btn_timesync):
+            btn.configure(state="normal",
+                          fg_color=WABASH_BLUE,
+                          hover_color=WABASH_BLUE_HOVER)
+        self._append_log(f"[Status] Active unit set to: {unit_id}", "status")
 
     def _on_close(self) -> None:
         self.serial_service.disconnect()
