@@ -1,8 +1,11 @@
 ﻿from __future__ import annotations
 
+import os
 import sys
+import json
 import time
 import datetime
+import subprocess
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -68,6 +71,17 @@ def _asset(rel: str) -> Path:
     return base / rel
 
 
+# App-local storage (Windows: %LOCALAPPDATA%\WabashInterface)
+_APP_DIR: Path = Path(
+    os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+) / "WabashInterface"
+_SETTINGS_FILE: Path = _APP_DIR / "settings.json"
+
+
+def _default_data_path() -> Path:
+    return _APP_DIR / "data"
+
+
 class MainWindow:
     def __init__(self) -> None:
         ctk.set_appearance_mode("system")
@@ -103,6 +117,17 @@ class MainWindow:
         self.offload_events_count = 0
         self.offload_last_status = "Idle"
         self.offload_status = "Idle"  # "Idle", "Connecting...", "Transferring...", "Complete", "Failed", "Timeout"
+
+        # Per-event file saving state
+        self._offload_pending_event_name: str | None = None
+        self._offload_pending_rows: list[str] = []
+        self._offload_lora_row_buf: str = ""
+        self._offload_saved_files: list[Path] = []
+        self._offload_session_dir: Path | None = None
+
+        # Data storage path (defaults to AppData, overridden by saved settings)
+        self.data_path_var = tk.StringVar(value=str(_default_data_path()))
+        self._load_app_settings()
 
         self.port_var     = tk.StringVar(value="")
         self.baud_var     = tk.StringVar(value="115200")
@@ -577,6 +602,47 @@ class MainWindow:
             progress_color=WABASH_BLUE,
             command=self._set_text_scale,
         ).grid(row=7, column=0, sticky="ew", padx=16, pady=(4, 14))
+
+        storage_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        storage_card.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        storage_card.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            storage_card, text="Data Storage",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=16, pady=(14, 6))
+        ctk.CTkLabel(
+            storage_card, text="Save Location",
+            text_color=("#475569", "#94A3B8"),
+        ).grid(row=1, column=0, sticky="w", padx=16, pady=6)
+        ctk.CTkEntry(
+            storage_card,
+            textvariable=self.data_path_var,
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew", padx=(6, 6), pady=6)
+        ctk.CTkButton(
+            storage_card,
+            text="Open",
+            width=70,
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=self._open_data_folder,
+        ).grid(row=1, column=2, sticky="e", padx=(0, 6), pady=6)
+        ctk.CTkButton(
+            storage_card,
+            text="Change...",
+            width=90,
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=self._browse_data_path,
+        ).grid(row=1, column=3, sticky="e", padx=(0, 16), pady=6)
+        ctk.CTkLabel(
+            storage_card,
+            text="Offloaded event files are saved here, organised by Truck ID.",
+            text_color=("#475569", "#94A3B8"),
+            font=ctk.CTkFont(size=12),
+            justify="left",
+            anchor="w",
+        ).grid(row=2, column=0, columnspan=4, sticky="ew", padx=16, pady=(0, 14))
 
     def _build_live_page(self) -> None:
         page = ctk.CTkFrame(self.page_container, corner_radius=0, fg_color='transparent')
@@ -1086,7 +1152,7 @@ class MainWindow:
     def _classify_line(self, line: str) -> str:
         if "TX>" in line:
             return "tx"
-        if line.startswith("DATA:") or line.startswith("DATC:"):
+        if line.startswith("DATA:") or line.startswith("DATC:") or line.startswith("EVENT_FILE:"):
             return "data"
         if line.startswith("RSP:") or line.startswith("END:") or line.startswith("["):
             return "status"
@@ -1200,6 +1266,11 @@ class MainWindow:
         self.offload_events_count = 0
         self.offload_status = "Connecting..."
         self.offload_last_status = "Offload started"
+        self._offload_pending_event_name = None
+        self._offload_pending_rows = []
+        self._offload_lora_row_buf = ""
+        self._offload_saved_files = []
+        self._offload_session_dir = None
         self._update_offload_status_display()
 
     def _get_offload_status_color(self) -> tuple[str, str]:
@@ -1307,18 +1378,39 @@ class MainWindow:
             self.offload_status = "Transferring..."
             self.offload_last_status = "Transmitter connected"
         # Wi-Fi countdown during TCP wait
-        elif "RSP:WIFI_WAIT:" in line or "[RSP:WIFI_WAIT:" in line:
+        elif "RSP:WIFI_WAIT:" in line or "[RSP:WIFI_WAIT:" in line or "[WIFI_WAIT:" in line:
             try:
                 countdown = line.split("WIFI_WAIT:")[-1].strip().rstrip("]").split()[0]
                 self.offload_status = "Connecting..."
                 self.offload_last_status = f"Waiting... {countdown}s"
             except:
                 pass
-        # Data rows: either classic DATA:/DATC: format or raw CSV data
-        elif line.startswith("DATA:") or line.startswith("DATC:"):
+        # Event file boundary marker — accept both direct receiver and transmitter-forwarded forms
+        elif line.startswith("DATA:EVENT_FILE:") or line.startswith("EVENT_FILE:"):
+            fname = line[16:].strip() if line.startswith("DATA:EVENT_FILE:") else line[11:].strip()
+            self._save_pending_event()
+            self._offload_pending_event_name = fname
+            self._offload_pending_rows = []
+            self._offload_lora_row_buf = ""
+            if self.offload_status not in ("Transferring...",):
+                if self.offload_data_start_time is None:
+                    self.offload_data_start_time = time.time()
+                self.offload_status = "Transferring..."
+        # Partial LoRa chunk — accumulate until a final DATA: completes the row
+        elif line.startswith("DATC:"):
             if self.offload_status != "Transferring...":
                 self.offload_data_start_time = time.time()
                 self.offload_status = "Transferring..."
+            self._offload_lora_row_buf += line[5:]
+        # Complete data row (Wi-Fi TCP full line, or final LoRa chunk)
+        elif line.startswith("DATA:"):
+            if self.offload_status != "Transferring...":
+                self.offload_data_start_time = time.time()
+                self.offload_status = "Transferring..."
+            complete_row = self._offload_lora_row_buf + line[5:]
+            self._offload_lora_row_buf = ""
+            if self._offload_pending_event_name is not None:
+                self._offload_pending_rows.append(complete_row)
             self.offload_events_count += 1
         # Raw data lines (numbers/CSV without DATA: prefix) during active transfer
         # Handles both digit-prefixed values and quoted timestamps ("Time not set",...)
@@ -1328,6 +1420,8 @@ class MainWindow:
             if self.offload_status != "Transferring...":
                 self.offload_data_start_time = time.time()
                 self.offload_status = "Transferring..."
+            if self._offload_pending_event_name is not None:
+                self._offload_pending_rows.append(line)
             self.offload_events_count += 1
         # TRANSFER summary message - arrives after END:D, update event count in last status
         elif "[TRANSFER]" in line:
@@ -1345,8 +1439,9 @@ class MainWindow:
                 pass
             self._update_offload_status_display()
         # Offload complete
-        elif "END:D" in line:
+        elif line.startswith("END:D"):
             if self.offload_in_progress:
+                self._save_pending_event()  # flush last event file
                 total_dur = time.time() - self.offload_start_time if self.offload_start_time else 0
                 # Store timing info; real event count will be updated by [TRANSFER] shortly after
                 self.offload_end_time = total_dur
@@ -1356,11 +1451,14 @@ class MainWindow:
                     self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
                 self.offload_in_progress = False
                 self.offload_status = "Complete"
-                self.offload_last_status = f"Success ({total_dur:.1f}s, {self.offload_events_count} events)"
+                saved_count = len(self._offload_saved_files)
+                save_note = f" \u2014 {saved_count} file(s) saved" if saved_count else ""
+                self.offload_last_status = f"Success ({total_dur:.1f}s, {self.offload_events_count} events){save_note}"
                 self._update_offload_status_display()
         # Wi-Fi timeout
         elif "RSP:WIFI_TX_TIMEOUT" in line or "WIFI_TX_TIMEOUT" in line:
             if self.offload_in_progress:
+                self._save_pending_event()  # flush last event file before ending
                 total_dur = time.time() - self.offload_start_time if self.offload_start_time else 0
                 self.offload_end_time = total_dur
                 if self.offload_data_start_time:
@@ -1369,11 +1467,14 @@ class MainWindow:
                     self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
                 self.offload_in_progress = False
                 self.offload_status = "Timeout"
-                self.offload_last_status = f"Wi-Fi timeout ({total_dur:.1f}s)"
+                saved_count = len(self._offload_saved_files)
+                save_note = f" — {saved_count} file(s) saved" if saved_count else ""
+                self.offload_last_status = f"Wi-Fi timeout ({total_dur:.1f}s){save_note}"
                 self._update_offload_status_display()
         # Wi-Fi connection failed
         elif "RSP:WIFI_FAIL:" in line or "[WIFI_FAIL]" in line:
             if self.offload_in_progress:
+                self._save_pending_event()  # flush last event file before ending
                 if self.offload_start_time:
                     self.offload_end_time = time.time() - self.offload_start_time
                 if self.offload_wifi_start_time and self.offload_connected_time:
@@ -1382,14 +1483,41 @@ class MainWindow:
                     self.offload_transfer_duration = time.time() - self.offload_data_start_time
                 self.offload_in_progress = False
                 self.offload_status = "Failed"
+                saved_count = len(self._offload_saved_files)
                 try:
-                    if "RSP:WIFI_FAIL:" in line:
-                        network = line.split("RSP:WIFI_FAIL:")[-1].strip().rstrip("]")
-                    else:
+                    if "[WIFI_FAIL]" in line:
                         network = line.split("[WIFI_FAIL]")[-1].strip()
-                    self.offload_last_status = f"Wi-Fi failed: {network}"
+                    else:
+                        network = line.split("RSP:WIFI_FAIL:")[-1].strip().rstrip("]")
+                    save_note = f" — {saved_count} file(s) saved" if saved_count else ""
+                    self.offload_last_status = f"Wi-Fi failed: {network}{save_note}"
                 except:
-                    self.offload_last_status = "Wi-Fi failed"
+                    save_note = f" — {saved_count} file(s) saved" if saved_count else ""
+                    self.offload_last_status = f"Wi-Fi failed{save_note}"
+                self._update_offload_status_display()
+        # Wi-Fi transmission layer failed (TCP, no profiles, or exhausted attempts)
+        elif "[WIFI_TX_FAIL]" in line or "RSP:WIFI_TX_FAIL" in line:
+            if self.offload_in_progress:
+                self._save_pending_event()  # flush any pending event before ending
+                total_dur = time.time() - self.offload_start_time if self.offload_start_time else 0
+                self.offload_end_time = total_dur
+                if self.offload_data_start_time:
+                    self.offload_transfer_duration = time.time() - self.offload_data_start_time
+                if self.offload_wifi_start_time and self.offload_connected_time:
+                    self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
+                self.offload_in_progress = False
+                self.offload_status = "Connection Failed"
+                saved_count = len(self._offload_saved_files)
+                try:
+                    if "[WIFI_TX_FAIL]" in line:
+                        reason = line.split("[WIFI_TX_FAIL]")[-1].strip()
+                    else:
+                        reason = line.split("RSP:WIFI_TX_FAIL")[-1].strip()
+                    save_note = f" — {saved_count} file(s) saved" if saved_count else ""
+                    self.offload_last_status = f"{reason}{save_note}" if reason else f"Wi-Fi unavailable{save_note}"
+                except:
+                    save_note = f" — {saved_count} file(s) saved" if saved_count else ""
+                    self.offload_last_status = f"Wi-Fi unavailable{save_note}"
                 self._update_offload_status_display()
         # Fallback to LoRa
         elif "RSP:WIFI_FALLBACK_LORA" in line or "WIFI_FALLBACK_LORA" in line:
@@ -1398,13 +1526,16 @@ class MainWindow:
         # No data to transfer
         elif "RSP:NO_DATA" in line or "NO_DATA" in line:
             if self.offload_in_progress:
+                self._save_pending_event()  # flush any pending event (though unlikely if no data)
                 total_dur = time.time() - self.offload_start_time if self.offload_start_time else 0
                 self.offload_end_time = total_dur
                 if self.offload_wifi_start_time and self.offload_connected_time:
                     self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
                 self.offload_in_progress = False
                 self.offload_status = "No Data"
-                self.offload_last_status = f"No events to transfer ({total_dur:.1f}s)"
+                saved_count = len(self._offload_saved_files)
+                save_note = f" — {saved_count} file(s) saved" if saved_count else ""
+                self.offload_last_status = f"No events to transfer ({total_dur:.1f}s){save_note}"
                 self._update_offload_status_display()
 
     def _get_selected_setup_mask(self) -> int:
@@ -1789,6 +1920,106 @@ class MainWindow:
             self.unit_setup_help_label.configure(wraplength=max(380, container_width - 36))
         except Exception:
             return
+
+    def _load_app_settings(self) -> None:
+        # Ensure app directory exists on startup
+        try:
+            _APP_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        
+        try:
+            if _SETTINGS_FILE.exists():
+                with _SETTINGS_FILE.open("r", encoding="utf-8") as f:
+                    settings = json.load(f)
+                if settings.get("data_path"):
+                    self.data_path_var.set(settings["data_path"])
+        except Exception:
+            pass
+
+    def _save_app_settings(self) -> None:
+        try:
+            _APP_DIR.mkdir(parents=True, exist_ok=True)
+            with _SETTINGS_FILE.open("w", encoding="utf-8") as f:
+                json.dump({"data_path": self.data_path_var.get()}, f, indent=2)
+        except Exception:
+            pass
+
+    def _browse_data_path(self) -> None:
+        folder = filedialog.askdirectory(title="Choose Data Save Location")
+        if folder:
+            self.data_path_var.set(folder)
+            self._save_app_settings()
+    
+    def _open_data_folder(self) -> None:
+        """Open the current data folder in file explorer."""
+        try:
+            data_path = Path(self.data_path_var.get())
+            data_path.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(str(data_path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(data_path)])
+            else:
+                subprocess.Popen(["xdg-open", str(data_path)])
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder: {e}")
+
+    def _save_pending_event(self) -> None:
+        """Flush buffered event rows to a local CSV file and reset the buffer."""
+        name = self._offload_pending_event_name
+        rows = list(self._offload_pending_rows)
+        # Clear state immediately to be safe against any re-entrant call
+        self._offload_pending_event_name = None
+        self._offload_pending_rows = []
+        self._offload_lora_row_buf = ""
+
+        if not name or not rows:
+            return
+
+        truck_id = self.truck_id_var.get().strip() or "Unknown"
+        safe_truck = (
+            "".join(c if c.isalnum() or c in " _-" else "_" for c in truck_id).strip()
+            or "Unknown"
+        )
+
+        try:
+            base = Path(self.data_path_var.get())
+            truck_dir = base / safe_truck
+            truck_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create one unique folder per offload session under the Truck ID directory.
+            if self._offload_session_dir is None:
+                ts_source = self.offload_start_time if self.offload_start_time is not None else time.time()
+                ts_name = datetime.datetime.fromtimestamp(ts_source).strftime("%Y-%m-%d_%H-%M-%S")
+                session_dir = truck_dir / ts_name
+                if session_dir.exists():
+                    suffix = 2
+                    while (truck_dir / f"{ts_name}_{suffix}").exists():
+                        suffix += 1
+                    session_dir = truck_dir / f"{ts_name}_{suffix}"
+                session_dir.mkdir(parents=True, exist_ok=True)
+                self._offload_session_dir = session_dir
+
+            safe_fname = name.replace("/", "_").replace("\\", "_")
+            dest = self._offload_session_dir / safe_fname
+            if dest.exists():
+                stem = dest.stem
+                suffix = dest.suffix
+                idx = 2
+                while True:
+                    candidate = self._offload_session_dir / f"{stem}_{idx}{suffix}"
+                    if not candidate.exists():
+                        dest = candidate
+                        break
+                    idx += 1
+            with dest.open("w", encoding="utf-8", newline="") as f:
+                for row in rows:
+                    f.write(row + "\n")
+            self._offload_saved_files.append(dest)
+        except Exception as exc:
+            # Defer log call to avoid re-entering _process_offload_message
+            self.root.after(0, lambda msg=f"[SAVE_ERR] {name}: {exc}": self._append_log(msg))
 
     def _send_unit_config(self) -> None:
         if not self._is_transmitter_connected():

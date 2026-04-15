@@ -1,8 +1,15 @@
 #include <Arduino.h>
 #include <RadioLib.h>
 #include <WiFi.h>
+#include <EEPROM.h>
 
 #define SERIAL_BAUD_RATE      115200
+
+// EEPROM storage for Wi-Fi profiles (32 bytes per SSID + 64 bytes per password = 288 bytes total)
+#define EEPROM_SIZE 512
+#define EEPROM_OFFSET_WIFI 0
+#define EEPROM_SSID_SIZE 32
+#define EEPROM_PASS_SIZE 64
 
 // LoRa (SX1262) Pin Definitions for Heltec WiFi LoRa 32 V3
 #define LORA_NSS              8
@@ -32,6 +39,9 @@ size_t dataTransferLines = 0;
 #define MAX_WIFI_PROFILES 3
 String t_wifiSsids[MAX_WIFI_PROFILES];
 String t_wifiPasswords[MAX_WIFI_PROFILES];
+
+// Allow extra headroom for receiver SD/Wi-Fi jitter before declaring transfer timeout.
+#define WIFI_TCP_IDLE_TIMEOUT_MS 30000UL
 
 #if defined(ESP8266) || defined(ESP32)
   ICACHE_RAM_ATTR
@@ -72,6 +82,59 @@ bool sendLoRaCommand(char command) {
     dataTransferLines = 0;
   }
   return true;
+}
+
+void saveWiFiProfilesToEEPROM() {
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    int16_t ssidLen = t_wifiSsids[i].length();
+    int ssidAddr = EEPROM_OFFSET_WIFI + (i * (2 + EEPROM_SSID_SIZE + 2 + EEPROM_PASS_SIZE));
+    
+    EEPROM.writeShort(ssidAddr, ssidLen);
+    for (size_t j = 0; j < EEPROM_SSID_SIZE; j++) {
+      EEPROM.writeByte(ssidAddr + 2 + j, (j < t_wifiSsids[i].length()) ? t_wifiSsids[i][j] : 0);
+    }
+    
+    int16_t passLen = t_wifiPasswords[i].length();
+    int passAddr = ssidAddr + 2 + EEPROM_SSID_SIZE;
+    EEPROM.writeShort(passAddr, passLen);
+    for (size_t j = 0; j < EEPROM_PASS_SIZE; j++) {
+      EEPROM.writeByte(passAddr + 2 + j, (j < t_wifiPasswords[i].length()) ? t_wifiPasswords[i][j] : 0);
+    }
+  }
+  EEPROM.commit();
+  Serial.println("[EEPROM] Wi-Fi profiles saved");
+}
+
+void loadWiFiProfilesFromEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    int ssidAddr = EEPROM_OFFSET_WIFI + (i * (2 + EEPROM_SSID_SIZE + 2 + EEPROM_PASS_SIZE));
+    
+    int16_t ssidLen = EEPROM.readShort(ssidAddr);
+    t_wifiSsids[i] = "";
+    if (ssidLen > 0 && ssidLen <= EEPROM_SSID_SIZE) {
+      for (int j = 0; j < ssidLen; j++) {
+        t_wifiSsids[i] += (char)EEPROM.readByte(ssidAddr + 2 + j);
+      }
+    }
+    
+    int16_t passLen = EEPROM.readShort(ssidAddr + 2 + EEPROM_SSID_SIZE);
+    t_wifiPasswords[i] = "";
+    if (passLen > 0 && passLen <= EEPROM_PASS_SIZE) {
+      int passAddr = ssidAddr + 2 + EEPROM_SSID_SIZE;
+      for (int j = 0; j < passLen; j++) {
+        t_wifiPasswords[i] += (char)EEPROM.readByte(passAddr + 2 + j);
+      }
+    }
+  }
+  
+  int configuredProfiles = 0;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (t_wifiSsids[i].length() > 0) configuredProfiles++;
+  }
+  if (configuredProfiles > 0) {
+    Serial.printf("[EEPROM] Loaded %d Wi-Fi profile(s)\n", configuredProfiles);
+  }
 }
 
 void parseAndStoreWifiProfiles(const String& packet) {
@@ -122,6 +185,9 @@ void parseAndStoreWifiProfiles(const String& packet) {
     }
     start = sep + 1;
   }
+  
+  // Persist the new profiles to EEPROM
+  saveWiFiProfilesToEEPROM();
 }
 
 bool connectTransmitterWiFi() {
@@ -143,6 +209,9 @@ bool connectTransmitterWiFi() {
     while (WiFi.status() != WL_CONNECTED && timeout > 0) {
       delay(1000);
       timeout--;
+      if (timeout > 0 && timeout < 8) {
+        Serial.printf("[WIFI_WAIT:%d] %s\n", timeout, t_wifiSsids[i].c_str());
+      }
     }
     if (WiFi.status() == WL_CONNECTED) {
       Serial.printf("[WIFI_CONNECTED] %s\n", t_wifiSsids[i].c_str());
@@ -167,7 +236,7 @@ void handleWifiServerMessage(const String& packet) {
   int port = payload.substring(colonPos + 1).toInt();
 
   if (!connectTransmitterWiFi()) {
-    Serial.println("[WIFI_TX_FAIL] No WiFi connection available");
+    Serial.println("[WIFI_TX_FAIL] No WiFi profiles or connection failed after all attempts");
     return;
   }
 
@@ -193,7 +262,7 @@ void handleWifiServerMessage(const String& packet) {
   dataTransferLines = 0;
 
   unsigned long lastActivity = millis();
-  while (client.connected() && (millis() - lastActivity) < 10000UL) {
+  while (client.connected() && (millis() - lastActivity) < WIFI_TCP_IDLE_TIMEOUT_MS) {
     if (!client.available()) continue;
     String line = client.readStringUntil('\n');
     line.replace("\r", "");
@@ -355,6 +424,9 @@ void setup() {
   Serial.println("\n=== Heltec LoRa Transmitter Bridge ===");
   Serial.println("Type a command character and press Enter.");
   Serial.println("Example: d  (request receiver event data)");
+  
+  // Load saved Wi-Fi profiles from EEPROM
+  loadWiFiProfilesFromEEPROM();
 
   int loraState = loraRadio.begin(LORA_FREQUENCY_MHZ,
                                   LORA_BANDWIDTH_KHZ,

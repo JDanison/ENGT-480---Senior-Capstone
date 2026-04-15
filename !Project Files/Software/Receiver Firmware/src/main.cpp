@@ -131,6 +131,9 @@ bool streamStoredEventsOverLoRa() {
       }
 
       if (baseName.startsWith("event ") && baseName.endsWith(".csv")) {
+        // Emit file boundary marker so the UI can save each event as its own file
+        sendLoRaMessage("DATA:EVENT_FILE:" + baseName);
+        delay(10);
         while (file.available()) {
           String line = file.readStringUntil('\n');
           line.replace("\r", "");
@@ -530,6 +533,8 @@ bool startWifiLocalOffload() {
             baseName = baseName.substring(slashIdx + 1);
           }
           if (baseName.startsWith("event ") && baseName.endsWith(".csv")) {
+            // Emit file boundary marker so the UI can save each event as its own file
+            client.println("DATA:EVENT_FILE:" + baseName);
             while (file.available()) {
               String line = file.readStringUntil('\n');
               line.replace("\r", "");
