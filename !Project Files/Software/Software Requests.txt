@@ -9,12 +9,8 @@ For Data Purposes:
 5) LoRa to offload rather than Wi-Fi | Maybe both?
 
 TODO Order:
-Continue - Updating the Data Offload terminal screen. Looks strange, and doesn't entirely work.
-
 Store the known units in the dashboard locally. Store the Wi-Fi credentials locally.
 
-1) Time Sync Button & Functionality
-2) Unit Tare Button & Funcationality
 3) Saving Data to App Data / Locally Selected Location
 4) Way to visualize / view the data?
 

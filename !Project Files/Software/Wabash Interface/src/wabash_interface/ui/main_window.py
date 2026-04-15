@@ -2,6 +2,7 @@
 
 import sys
 import time
+import datetime
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -136,6 +137,8 @@ class MainWindow:
         self.wifi1_password_var = tk.StringVar(value="")
 
         self.send_config_button: ctk.CTkButton | None = None
+        self.unit_setup_help_label: ctk.CTkLabel | None = None
+        self.unit_setup_desc_card: ctk.CTkFrame | None = None
         self._setup_apply_vars = [
             self.apply_sensor_interval_var,
             self.apply_threshold_var,
@@ -718,7 +721,7 @@ class MainWindow:
             act_card, text='Time Sync',
             fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER,
             state='disabled',
-            command=lambda: self._send_quick('s'))
+            command=self._send_time_sync)
         self.btn_timesync.grid(row=1, column=2, padx=(4, 14), pady=(0, 12),
                                sticky='ew')
 
@@ -1057,6 +1060,11 @@ class MainWindow:
 
     def _send_quick(self, command: str) -> None:
         self._send_payload(command)
+
+    def _send_time_sync(self) -> None:
+        # Send local PC time to receiver over LoRa (no Wi-Fi dependency).
+        now_local = datetime.datetime.now().replace(microsecond=0)
+        self._send_payload(f"TIME:{now_local.strftime('%Y-%m-%d %H:%M:%S')}")
 
     def _send_custom(self) -> None:
         payload = self.command_var.get()
@@ -1562,6 +1570,7 @@ class MainWindow:
         )
         page.grid_columnconfigure(0, weight=1)
         self.pages["Unit Setup"] = page
+        page.bind("<Configure>", lambda _e: self._update_unit_setup_wrap(), add="+")
 
         header = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -1680,14 +1689,18 @@ class MainWindow:
 
         desc_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         desc_card.grid(row=5, column=0, sticky="ew", pady=(0, 12))
-        ctk.CTkLabel(
+        desc_card.grid_columnconfigure(0, weight=1)
+        desc_card.bind("<Configure>", lambda _e: self._update_unit_setup_wrap(), add="+")
+        self.unit_setup_desc_card = desc_card
+        self.unit_setup_help_label = ctk.CTkLabel(
             desc_card,
             text="Select the fields to include above. Unselected values are left unchanged on the receiver. Selecting Wi-Fi with blank SSID/password clears the stored Wi-Fi network. To send a configuration, at least one field must be selected and you must be connected to a transmitter.",
-            wraplength=1100,
+            wraplength=800,
             justify="left",
             text_color=("#334155", "#CBD5E1"),
             font=ctk.CTkFont(size=12),
-        ).grid(row=0, column=0, sticky="w", padx=16, pady=12)
+        )
+        self.unit_setup_help_label.grid(row=0, column=0, sticky="ew", padx=16, pady=12)
 
         update_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         update_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
@@ -1754,6 +1767,28 @@ class MainWindow:
         )
         self.send_config_button.grid(row=6, column=0, sticky="ew")
         self._update_send_config_button()
+        self.root.after(0, self._update_unit_setup_wrap)
+
+    def _update_unit_setup_wrap(self) -> None:
+        if self.unit_setup_help_label is None:
+            return
+
+        try:
+            if self.unit_setup_desc_card is not None:
+                container_width = self.unit_setup_desc_card.winfo_width()
+            else:
+                page = self.pages.get("Unit Setup")
+                if page is None:
+                    return
+                container_width = page.winfo_width()
+
+            if container_width <= 1:
+                return
+
+            # Account for label side padding so wrapping matches the card's visible width.
+            self.unit_setup_help_label.configure(wraplength=max(380, container_width - 36))
+        except Exception:
+            return
 
     def _send_unit_config(self) -> None:
         if not self._is_transmitter_connected():

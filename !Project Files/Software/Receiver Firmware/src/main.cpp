@@ -60,6 +60,7 @@ constexpr uint8_t SETUP_MASK_LEGACY_DEFAULT = SETUP_MASK_SENSOR_INTERVAL |
                                               SETUP_MASK_WIFI;
 
 void processSerialCommand(char command);
+bool setTimeManually(const char* dateTimeStr);
 
 #if defined(ESP8266) || defined(ESP32)
   ICACHE_RAM_ATTR
@@ -569,6 +570,30 @@ void applyConfiguration() {
   Serial.println("Unit is now using new parameters.");
 }
 
+bool handleLoRaTimeSyncPacket(const String& packet) {
+  if (!packet.startsWith("TIME:")) {
+    return false;
+  }
+
+  String dateTime = packet.substring(5);
+  dateTime.trim();
+
+  Serial.printf("LoRa TIME received: %s\n", dateTime.c_str());
+
+  if (dateTime.length() != 19) {
+    sendLoRaMessage("RSP:TIME_SYNC_ERR:FORMAT");
+    return true;
+  }
+
+  if (setTimeManually(dateTime.c_str())) {
+    sendLoRaMessage("RSP:TIME_SYNC_OK");
+  } else {
+    sendLoRaMessage("RSP:TIME_SYNC_ERR:VALUE");
+  }
+
+  return true;
+}
+
 void handleLoRaCommandPacket(const String& packet) {
   if (!packet.startsWith("CMD:") || packet.length() != 5) {
     // Ignore malformed or unrelated packets to avoid serial spam.
@@ -603,8 +628,17 @@ void handleLoRaCommandPacket(const String& packet) {
     return;
   }
 
-  // Safety hardening: only allow remote data-dump command over LoRa.
-  // All other commands stay local via receiver USB serial.
+  if (command == 'z' || command == 'Z') {
+    bool tareSuccess = nau7802.tare(100);
+    if (tareSuccess) {
+      sendLoRaMessage("RSP:TARE_OK");
+    } else {
+      sendLoRaMessage("RSP:TARE_FAIL");
+    }
+    return;
+  }
+
+  // Unsupported command for remote LoRa control.
   sendLoRaMessage("RSP:ERR_UNSUPPORTED");
 }
 
@@ -620,6 +654,8 @@ void processLoRaPackets() {
     packet.trim();
     if (packet.startsWith("CMD:") && packet.length() == 5) {
       handleLoRaCommandPacket(packet);
+    } else if (packet.startsWith("TIME:")) {
+      handleLoRaTimeSyncPacket(packet);
     } else if (packet.startsWith("SETUP:")) {
       if (parseSetupPacket(packet)) {
         applyConfiguration();
