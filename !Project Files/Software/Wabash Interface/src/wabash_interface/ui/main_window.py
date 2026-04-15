@@ -36,6 +36,14 @@ DENSITY = {
     "Comfortable": (16, 6, 12, 8),
 }
 
+SETUP_MASK_SENSOR_INTERVAL = 1 << 0
+SETUP_MASK_THRESHOLD = 1 << 1
+SETUP_MASK_SAMPLE_RATE = 1 << 2
+SETUP_MASK_DURATION = 1 << 3
+SETUP_MASK_TRUCK_ID = 1 << 4
+SETUP_MASK_DESCRIPTION = 1 << 5
+SETUP_MASK_WIFI = 1 << 6
+
 
 def _asset(rel: str) -> Path:
     """Return path to a bundled asset whether running frozen or from source."""
@@ -83,17 +91,37 @@ class MainWindow:
         self.event_trigger_threshold_var = tk.StringVar(value="2.0")
         self.lab_sample_rate_var = tk.StringVar(value="20")
         self.event_duration_var = tk.StringVar(value="2000")
-        self.include_truck_id_var = tk.BooleanVar(value=False)
         self.truck_id_var = tk.StringVar(value="")
-        self.include_description_var = tk.BooleanVar(value=False)
         self.description_var = tk.StringVar(value="")
+
+        self.apply_sensor_interval_var = tk.BooleanVar(value=False)
+        self.apply_threshold_var = tk.BooleanVar(value=False)
+        self.apply_sample_rate_var = tk.BooleanVar(value=False)
+        self.apply_duration_var = tk.BooleanVar(value=False)
+        self.apply_truck_id_var = tk.BooleanVar(value=False)
+        self.apply_description_var = tk.BooleanVar(value=False)
+        self.apply_wifi_var = tk.BooleanVar(value=False)
 
         # Wi-Fi credential slot (sent to receiver for Wi-Fi-first offload)
         self.wifi1_ssid_var = tk.StringVar(value="")
         self.wifi1_password_var = tk.StringVar(value="")
 
-        self.pages: dict[str, ctk.CTkFrame] = {}
+        self.send_config_button: ctk.CTkButton | None = None
+        self._setup_apply_vars = [
+            self.apply_sensor_interval_var,
+            self.apply_threshold_var,
+            self.apply_sample_rate_var,
+            self.apply_duration_var,
+            self.apply_truck_id_var,
+            self.apply_description_var,
+            self.apply_wifi_var,
+        ]
+        for var in self._setup_apply_vars:
+            var.trace_add("write", self._on_setup_selection_changed)
+
+        self.pages: dict[str, ctk.CTkFrame | ctk.CTkScrollableFrame] = {}
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
+        self._active_page_name: str | None = None
 
         # set window icon
         icon_path = _asset("assets/images/icon.ico")
@@ -122,6 +150,7 @@ class MainWindow:
 
         self.page_container = ctk.CTkFrame(self.root, corner_radius=0, fg_color="transparent")
         self.page_container.grid(row=0, column=1, sticky="nsew", padx=14, pady=14)
+        self.page_container.grid_propagate(False)
         self.page_container.grid_columnconfigure(0, weight=1)
         self.page_container.grid_rowconfigure(0, weight=1)
 
@@ -217,11 +246,14 @@ class MainWindow:
         return value
 
     def _show_page(self, page_name: str) -> None:
-        for name, frame in self.pages.items():
-            if name == page_name:
-                frame.grid(row=0, column=0, sticky="nsew")
-            else:
-                frame.grid_remove()
+        if self._active_page_name == page_name:
+            return
+
+        if self._active_page_name is not None and self._active_page_name in self.pages:
+            self.pages[self._active_page_name].grid_remove()
+
+        self.pages[page_name].grid(row=0, column=0, sticky="nsew")
+        self._active_page_name = page_name
 
         for name, button in self.nav_buttons.items():
             if name == page_name:
@@ -919,7 +951,7 @@ class MainWindow:
         if line.startswith("END:D"):
             self.session_events += 1
             self.db_event_count.configure(text=str(self.session_events))
-            if self.include_truck_id_var.get() and self.truck_id_var.get().strip():
+            if self.truck_id_var.get().strip():
                 self._register_unit(self.truck_id_var.get().strip())
 
         self.db_tx_count.configure(text=str(self.tx_count))
@@ -962,8 +994,75 @@ class MainWindow:
         output = export_text_log(self.log_lines, Path(selected))
         messagebox.showinfo("Export Complete", f"Saved log to:\n{output}")
 
+    def _get_selected_setup_mask(self) -> int:
+        mask = 0
+        if self.apply_sensor_interval_var.get():
+            mask |= SETUP_MASK_SENSOR_INTERVAL
+        if self.apply_threshold_var.get():
+            mask |= SETUP_MASK_THRESHOLD
+        if self.apply_sample_rate_var.get():
+            mask |= SETUP_MASK_SAMPLE_RATE
+        if self.apply_duration_var.get():
+            mask |= SETUP_MASK_DURATION
+        if self.apply_truck_id_var.get():
+            mask |= SETUP_MASK_TRUCK_ID
+        if self.apply_description_var.get():
+            mask |= SETUP_MASK_DESCRIPTION
+        if self.apply_wifi_var.get():
+            mask |= SETUP_MASK_WIFI
+        return mask
+
+    def _get_selected_setup_labels(self) -> list[str]:
+        labels: list[str] = []
+        if self.apply_sensor_interval_var.get():
+            labels.append("Sensor Read Interval")
+        if self.apply_threshold_var.get():
+            labels.append("Event Trigger Threshold")
+        if self.apply_sample_rate_var.get():
+            labels.append("Strain Gauge Poll Rate")
+        if self.apply_duration_var.get():
+            labels.append("Event Capture Duration")
+        if self.apply_truck_id_var.get():
+            labels.append("Truck ID")
+        if self.apply_description_var.get():
+            labels.append("Description")
+        if self.apply_wifi_var.get():
+            labels.append("Wi-Fi Network")
+        return labels
+
+    def _update_send_config_button(self) -> None:
+        if self.send_config_button is None:
+            return
+
+        has_selection = self._get_selected_setup_mask() != 0
+        if has_selection:
+            self.send_config_button.configure(
+                state="normal",
+                fg_color=WABASH_BLUE,
+                hover_color=WABASH_BLUE_HOVER,
+            )
+        else:
+            self.send_config_button.configure(
+                state="disabled",
+                fg_color=BTN_GREY,
+                hover_color=BTN_GREY,
+            )
+
+    def _on_setup_selection_changed(self, *_args: object) -> None:
+        self._update_send_config_button()
+
+    def _set_all_setup_selection(self, selected: bool) -> None:
+        for var in self._setup_apply_vars:
+            var.set(selected)
+
     def _build_unit_setup_page(self) -> None:
-        page = ctk.CTkFrame(self.page_container, corner_radius=0, fg_color="transparent")
+        page = ctk.CTkScrollableFrame(
+            self.page_container,
+            corner_radius=0,
+            fg_color="transparent",
+            scrollbar_button_color=BTN_GREY,
+            scrollbar_button_hover_color=BTN_GREY_HOVER,
+        )
         page.grid_columnconfigure(0, weight=1)
         self.pages["Unit Setup"] = page
 
@@ -983,32 +1082,18 @@ class MainWindow:
             font=ctk.CTkFont(size=16, weight="bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 6))
 
-        self.include_truck_id_cb = ctk.CTkCheckBox(
-            info_card,
-            text="Include Truck ID",
-            variable=self.include_truck_id_var,
-            onvalue=True,
-            offvalue=False,
-            fg_color=WABASH_BLUE,
-            hover_color=WABASH_BLUE_HOVER,
+        ctk.CTkLabel(info_card, text="Truck ID", text_color=("#475569", "#94A3B8")).grid(
+            row=1, column=0, sticky="w", padx=16, pady=6
         )
-        self.include_truck_id_cb.grid(row=1, column=0, sticky="w", padx=16, pady=6)
         ctk.CTkEntry(
             info_card,
             textvariable=self.truck_id_var,
             placeholder_text="Truck ID",
         ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=6)
 
-        self.include_description_cb = ctk.CTkCheckBox(
-            info_card,
-            text="Include Description",
-            variable=self.include_description_var,
-            onvalue=True,
-            offvalue=False,
-            fg_color=WABASH_BLUE,
-            hover_color=WABASH_BLUE_HOVER,
+        ctk.CTkLabel(info_card, text="Description", text_color=("#475569", "#94A3B8")).grid(
+            row=2, column=0, sticky="w", padx=16, pady=(6, 14)
         )
-        self.include_description_cb.grid(row=2, column=0, sticky="w", padx=16, pady=(6, 14))
         ctk.CTkEntry(
             info_card,
             textvariable=self.description_var,
@@ -1100,14 +1185,67 @@ class MainWindow:
         desc_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
         ctk.CTkLabel(
             desc_card,
-            text="Truck ID/Description are optional. The Wi-Fi network is stored on the receiver SD card and used first during Request Data before LoRa fallback.",
+            text="Select the fields to include above. Unselected values are left unchanged on the receiver. Selecting Wi-Fi with blank SSID/password clears the stored Wi-Fi network.",
             wraplength=1100,
             justify="left",
             text_color=("#334155", "#CBD5E1"),
             font=ctk.CTkFont(size=12),
         ).grid(row=0, column=0, sticky="w", padx=16, pady=12)
 
+        update_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        update_card.grid(row=5, column=0, sticky="ew", pady=(0, 12))
+        update_card.grid_columnconfigure((0, 1, 2), weight=1)
+
+        ctk.CTkLabel(
+            update_card,
+            text="Include In This Update",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(14, 10))
+
+        update_options = [
+            ("Truck ID", self.apply_truck_id_var),
+            ("Description", self.apply_description_var),
+            ("Sensor Interval", self.apply_sensor_interval_var),
+            ("Trigger Threshold", self.apply_threshold_var),
+            ("Poll Rate", self.apply_sample_rate_var),
+            ("Capture Duration", self.apply_duration_var),
+            ("Wi-Fi Network", self.apply_wifi_var),
+        ]
+        for idx, (label, var) in enumerate(update_options):
+            row = 1 + (idx // 3)
+            col = idx % 3
+            ctk.CTkCheckBox(
+                update_card,
+                text=label,
+                variable=var,
+                onvalue=True,
+                offvalue=False,
+                fg_color=WABASH_BLUE,
+                hover_color=WABASH_BLUE_HOVER,
+            ).grid(row=row, column=col, sticky="w", padx=16, pady=(0, 10 if idx < 6 else 14))
+
+        button_bar = ctk.CTkFrame(update_card, fg_color="transparent")
+        button_bar.grid(row=4, column=0, columnspan=3, sticky="w", padx=16, pady=(0, 14))
+
         ctk.CTkButton(
+            button_bar,
+            text="Select All",
+            width=110,
+            command=lambda: self._set_all_setup_selection(True),
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+        ).grid(row=0, column=0, padx=(0, 8))
+
+        ctk.CTkButton(
+            button_bar,
+            text="Deselect All",
+            width=110,
+            command=lambda: self._set_all_setup_selection(False),
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+        ).grid(row=0, column=1)
+
+        self.send_config_button = ctk.CTkButton(
             page,
             text="Send Configuration",
             command=self._send_unit_config,
@@ -1115,7 +1253,10 @@ class MainWindow:
             hover_color=WABASH_BLUE_HOVER,
             font=ctk.CTkFont(size=14, weight="bold"),
             height=40,
-        ).grid(row=5, column=0, sticky="ew")
+            state="disabled",
+        )
+        self.send_config_button.grid(row=6, column=0, sticky="ew")
+        self._update_send_config_button()
 
     def _send_unit_config(self) -> None:
         if not self.serial_service.is_connected:
@@ -1123,13 +1264,26 @@ class MainWindow:
             return
 
         try:
-            interval = int(self.sensor_interval_var.get().strip())
-            threshold = float(self.event_trigger_threshold_var.get().strip())
-            sample_rate = int(self.lab_sample_rate_var.get().strip())
-            duration = int(self.event_duration_var.get().strip())
+            setup_mask = self._get_selected_setup_mask()
+            if setup_mask == 0:
+                messagebox.showwarning("No Fields Selected", "Select at least one field to include in this update.")
+                return
 
-            include_truck = bool(self.include_truck_id_var.get())
-            include_desc = bool(self.include_description_var.get())
+            interval = 0
+            if self.apply_sensor_interval_var.get():
+                interval = int(self.sensor_interval_var.get().strip())
+
+            threshold = 0.0
+            if self.apply_threshold_var.get():
+                threshold = float(self.event_trigger_threshold_var.get().strip())
+
+            sample_rate = 0
+            if self.apply_sample_rate_var.get():
+                sample_rate = int(self.lab_sample_rate_var.get().strip())
+
+            duration = 0
+            if self.apply_duration_var.get():
+                duration = int(self.event_duration_var.get().strip())
 
             truck_id = self.truck_id_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
             description = self.description_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
@@ -1137,15 +1291,7 @@ class MainWindow:
             wifi_ssid = self.wifi1_ssid_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
             wifi_password = self.wifi1_password_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
 
-            if include_truck and not truck_id:
-                messagebox.showwarning("Missing Truck ID", "Truck ID checkbox is enabled, but Truck ID is empty.")
-                return
-
-            if include_desc and not description:
-                messagebox.showwarning("Missing Description", "Description checkbox is enabled, but Description is empty.")
-                return
-
-            if wifi_password and not wifi_ssid:
+            if self.apply_wifi_var.get() and wifi_password and not wifi_ssid:
                 messagebox.showwarning(
                     "Wi-Fi Setup Error",
                     "Wi-Fi password is set, but the SSID is empty.",
@@ -1162,9 +1308,8 @@ class MainWindow:
             ]
 
             packet = (
-                f"SETUP:si={interval};thr={threshold};sr={sample_rate};dur={duration};"
-                f"ti={1 if include_truck else 0};tid={truck_id if include_truck else ''};"
-                f"di={1 if include_desc else 0};desc={description if include_desc else ''};"
+                f"SETUP:m={setup_mask};si={interval};thr={threshold};sr={sample_rate};dur={duration};"
+                f"tid={truck_id};desc={description};"
                 + ";".join(wifi_fields)
             )
 
@@ -1180,30 +1325,26 @@ class MainWindow:
             wire_payload = f"{packet}\n"
             self.serial_service.send_text(wire_payload)
 
-            wifi_configured = 1 if wifi_ssid else 0
+            wifi_configured = 1 if (self.apply_wifi_var.get() and wifi_ssid) else 0
+            updated_fields = ", ".join(self._get_selected_setup_labels())
 
             messagebox.showinfo(
                 "Configuration Sent",
                 f"Unit configuration sent:\n\n"
-                f"Sensor Interval: {interval}ms\n"
-                f"Event Trigger Threshold: {threshold}g\n"
-                f"Strain Gauge Poll Rate: {sample_rate}Hz\n"
-                f"Event Duration: {duration}ms\n"
-                f"Truck ID Included: {'Yes' if include_truck else 'No'}\n"
-                f"Description Included: {'Yes' if include_desc else 'No'}\n"
+                f"Fields Updated: {updated_fields}\n"
                 f"Wi-Fi Network Saved: {wifi_configured}"
             )
         except ValueError:
-            messagebox.showerror("Invalid Input", "Threshold and duration must be numeric values.")
+            messagebox.showerror("Invalid Input", "Selected numeric fields must contain valid numeric values.")
         except Exception as exc:
             messagebox.showerror("Send Error", str(exc))
 
     def _update_active_unit_display(self) -> None:
         """Refresh the Active Unit panel on the dashboard from Unit Setup values."""
-        if self.include_truck_id_var.get() and self.truck_id_var.get().strip():
+        if self.truck_id_var.get().strip():
             tid = self.truck_id_var.get().strip()
             self.db_unit_id.configure(text=tid, text_color=("#1E293B", "#E2E8F0"))
-            if self.include_description_var.get() and self.description_var.get().strip():
+            if self.description_var.get().strip():
                 self.db_unit_desc.configure(text=self.description_var.get().strip())
             else:
                 self.db_unit_desc.configure(text="No description set")
@@ -1305,7 +1446,7 @@ class MainWindow:
 
     def _select_scanned_unit(self, unit_id: str) -> None:
         self.truck_id_var.set(unit_id)
-        self.include_truck_id_var.set(True)
+        self.apply_truck_id_var.set(True)
         self._update_active_unit_display()
         self._register_unit(unit_id)
         # Enable unit action buttons

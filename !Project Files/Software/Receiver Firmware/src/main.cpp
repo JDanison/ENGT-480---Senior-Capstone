@@ -37,12 +37,27 @@ unsigned int LAB_TEST_SAMPLE_RATE_HZ = 20;      // Default: 20Hz
 // ===== TRUCK IDENTITY (set via SETUP packet or loaded from SD) =====
 String g_truckId = "";
 bool g_includeTruckId = false;
+String g_description = "";
+bool g_includeDescription = false;
 // ===================================================================
 
 // ===== WiFi Offload Profiles (set via SETUP packet or loaded from SD) =====
 String g_wifiSsids[MAX_WIFI_PROFILES];
 String g_wifiPasswords[MAX_WIFI_PROFILES];
 // ===========================================================================
+
+constexpr uint8_t SETUP_MASK_SENSOR_INTERVAL = 1 << 0;
+constexpr uint8_t SETUP_MASK_THRESHOLD = 1 << 1;
+constexpr uint8_t SETUP_MASK_SAMPLE_RATE = 1 << 2;
+constexpr uint8_t SETUP_MASK_DURATION = 1 << 3;
+constexpr uint8_t SETUP_MASK_TRUCK_ID = 1 << 4;
+constexpr uint8_t SETUP_MASK_DESCRIPTION = 1 << 5;
+constexpr uint8_t SETUP_MASK_WIFI = 1 << 6;
+constexpr uint8_t SETUP_MASK_LEGACY_DEFAULT = SETUP_MASK_SENSOR_INTERVAL |
+                                              SETUP_MASK_THRESHOLD |
+                                              SETUP_MASK_SAMPLE_RATE |
+                                              SETUP_MASK_DURATION |
+                                              SETUP_MASK_WIFI;
 
 void processSerialCommand(char command);
 
@@ -140,10 +155,6 @@ bool streamStoredEventsOverLoRa() {
 }
 
 bool saveTruckInfoToSd(const String& truckId, const String& description, bool includeTruckId, bool includeDescription) {
-  if (!includeTruckId && !includeDescription) {
-    return true;
-  }
-
   if (!sdCard.isInitialized()) {
     Serial.println("Truck info not saved: SD card not initialized.");
     return false;
@@ -199,16 +210,18 @@ bool parseSetupPacket(const String& packet) {
   float nextThreshold = ACCEL_THRESHOLD;
   unsigned int nextSampleRate = LAB_TEST_SAMPLE_RATE_HZ;
   unsigned long nextDuration = EVENT_CAPTURE_DURATION_MS;
-  bool includeTruckId = false;
-  bool includeDescription = false;
-  String truckId = "";
-  String description = "";
+  bool includeTruckId = g_includeTruckId;
+  bool includeDescription = g_includeDescription;
+  String truckId = g_truckId;
+  String description = g_description;
   String nextSsids[MAX_WIFI_PROFILES];
   String nextPasswords[MAX_WIFI_PROFILES];
+  uint8_t setupMask = SETUP_MASK_LEGACY_DEFAULT;
+  bool maskProvided = false;
 
   for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
-    nextSsids[i] = "";
-    nextPasswords[i] = "";
+    nextSsids[i] = g_wifiSsids[i];
+    nextPasswords[i] = g_wifiPasswords[i];
   }
 
   int start = 0;
@@ -233,6 +246,14 @@ bool parseSetupPacket(const String& packet) {
           return false;
         }
         nextInterval = v;
+      } else if (key == "m") {
+        unsigned long v = value.toInt();
+        if (v > 127) {
+          Serial.println("ERROR: Setup mask out of range (0-127)");
+          return false;
+        }
+        setupMask = (uint8_t)v;
+        maskProvided = true;
       } else if (key == "thr") {
         float v = value.toFloat();
         if (v <= 0.0f || v > 10.0f) {
@@ -277,20 +298,43 @@ bool parseSetupPacket(const String& packet) {
     start = sep + 1;
   }
 
-  SENSOR_READ_INTERVAL = nextInterval;
-  ACCEL_THRESHOLD = nextThreshold;
-  LAB_TEST_SAMPLE_RATE_HZ = nextSampleRate;
-  EVENT_CAPTURE_DURATION_MS = nextDuration;
-
-  // Store truck identity in memory
-  g_includeTruckId = includeTruckId;
-  if (includeTruckId && truckId.length() > 0) {
-    g_truckId = truckId;
+  if (setupMask & SETUP_MASK_SENSOR_INTERVAL) {
+    SENSOR_READ_INTERVAL = nextInterval;
+  }
+  if (setupMask & SETUP_MASK_THRESHOLD) {
+    ACCEL_THRESHOLD = nextThreshold;
+  }
+  if (setupMask & SETUP_MASK_SAMPLE_RATE) {
+    LAB_TEST_SAMPLE_RATE_HZ = nextSampleRate;
+  }
+  if (setupMask & SETUP_MASK_DURATION) {
+    EVENT_CAPTURE_DURATION_MS = nextDuration;
   }
 
-  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
-    g_wifiSsids[i] = nextSsids[i];
-    g_wifiPasswords[i] = nextPasswords[i];
+  if (!maskProvided) {
+    if (includeTruckId) {
+      setupMask |= SETUP_MASK_TRUCK_ID;
+    }
+    if (includeDescription) {
+      setupMask |= SETUP_MASK_DESCRIPTION;
+    }
+  }
+
+  if (setupMask & SETUP_MASK_TRUCK_ID) {
+    g_truckId = truckId;
+    g_includeTruckId = (truckId.length() > 0);
+  }
+
+  if (setupMask & SETUP_MASK_DESCRIPTION) {
+    g_description = description;
+    g_includeDescription = (description.length() > 0);
+  }
+
+  if (setupMask & SETUP_MASK_WIFI) {
+    for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+      g_wifiSsids[i] = nextSsids[i];
+      g_wifiPasswords[i] = nextPasswords[i];
+    }
   }
 
   Serial.println("SETUP applied:");
@@ -299,12 +343,16 @@ bool parseSetupPacket(const String& packet) {
   Serial.printf("  LAB_TEST_SAMPLE_RATE_HZ: %u Hz\n", LAB_TEST_SAMPLE_RATE_HZ);
   Serial.printf("  EVENT_CAPTURE_DURATION_MS: %lu ms\n", EVENT_CAPTURE_DURATION_MS);
 
-  if (!saveTruckInfoToSd(truckId, description, includeTruckId, includeDescription)) {
-    Serial.println("SETUP warning: truck info requested but not saved.");
+  if ((setupMask & (SETUP_MASK_TRUCK_ID | SETUP_MASK_DESCRIPTION)) != 0) {
+    if (!saveTruckInfoToSd(g_truckId, g_description, g_includeTruckId, g_includeDescription)) {
+      Serial.println("SETUP warning: truck info requested but not saved.");
+    }
   }
 
-  if (!saveWiFiProfilesToSd()) {
-    Serial.println("SETUP warning: WiFi profiles were not saved.");
+  if ((setupMask & SETUP_MASK_WIFI) != 0) {
+    if (!saveWiFiProfilesToSd()) {
+      Serial.println("SETUP warning: WiFi profiles were not saved.");
+    }
   }
 
   int wifiConfigured = 0;
@@ -769,11 +817,19 @@ void loadTruckInfoFromSd() {
     if (line.startsWith("truck_id=")) {
       String val = line.substring(9);
       val.trim();
-      if (val.length() > 0) { g_truckId = val; }
+      g_truckId = val;
     } else if (line.startsWith("include_truck_id=")) {
       String val2 = line.substring(17);
       val2.trim();
       g_includeTruckId = (val2 == "1");
+    } else if (line.startsWith("description=")) {
+      String val3 = line.substring(12);
+      val3.trim();
+      g_description = val3;
+    } else if (line.startsWith("include_description=")) {
+      String val4 = line.substring(20);
+      val4.trim();
+      g_includeDescription = (val4 == "1");
     }
   }
   f.close();

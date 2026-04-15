@@ -19,6 +19,8 @@
 #define LORA_TX_POWER_DBM     14
 #define LORA_PREAMBLE_LEN     8
 
+#define SETUP_MASK_WIFI       (1 << 6)
+
 SX1262 loraRadio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 volatile bool loraPacketReceived = false;
 
@@ -75,6 +77,9 @@ bool sendLoRaCommand(char command) {
 void parseAndStoreWifiProfiles(const String& packet) {
   if (!packet.startsWith("SETUP:")) return;
   String data = packet.substring(6);
+
+  bool maskProvided = false;
+  unsigned int setupMask = 0;
   int start = 0;
   while (start < (int)data.length()) {
     int sep = data.indexOf(';', start);
@@ -85,7 +90,28 @@ void parseAndStoreWifiProfiles(const String& packet) {
       String key = token.substring(0, eq);
       String value = token.substring(eq + 1);
       key.trim(); value.trim();
-      // Key format: w0s, w0p, w1s, w1p, w2s, w2p
+      if (key == "m") {
+        setupMask = (unsigned int)value.toInt();
+        maskProvided = true;
+      }
+    }
+    start = sep + 1;
+  }
+
+  if (maskProvided && (setupMask & SETUP_MASK_WIFI) == 0) {
+    return;
+  }
+
+  start = 0;
+  while (start < (int)data.length()) {
+    int sep = data.indexOf(';', start);
+    if (sep < 0) sep = (int)data.length();
+    String token = data.substring(start, sep);
+    int eq = token.indexOf('=');
+    if (eq > 0) {
+      String key = token.substring(0, eq);
+      String value = token.substring(eq + 1);
+      key.trim(); value.trim();
       if (key.length() == 3 && key.charAt(0) == 'w' && isDigit(key.charAt(1))) {
         int idx = key.charAt(1) - '0';
         if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
