@@ -1,11 +1,13 @@
 ﻿from __future__ import annotations
 
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
+import serial
 
 from serial.tools import list_ports
 
@@ -44,6 +46,17 @@ SETUP_MASK_TRUCK_ID = 1 << 4
 SETUP_MASK_DESCRIPTION = 1 << 5
 SETUP_MASK_WIFI = 1 << 6
 
+OFFLOAD_STATUS_COLORS = {
+    "Idle": ("#64748B", "#94A3B8"),
+    "Connecting...": (WABASH_BLUE, "#60A5FA"),
+    "Transferring...": ("#0F766E", "#2DD4BF"),
+    "Complete": ("#15803D", "#4ADE80"),
+    "Timeout": ("#B45309", "#FBBF24"),
+    "Failed": ("#DC2626", "#F87171"),
+    "Fallback LoRa": ("#7C3AED", "#C4B5FD"),
+    "No Data": ("#475569", "#CBD5E1"),
+}
+
 
 def _asset(rel: str) -> Path:
     """Return path to a bundled asset whether running frozen or from source."""
@@ -69,10 +82,26 @@ class MainWindow:
         self.tx_count = 0
         self.rx_count = 0
         self.connected = False
+        self.connected_role = "disconnected"
         self.last_message = "No messages yet"
         self.lora_active = False
         self.session_events = 0
         self.units: dict[str, dict] = {}
+        self.detected_port_roles: dict[str, str] = {}
+        self.connected_port = "-"
+
+        # Offload statistics tracking
+        self.offload_in_progress = False
+        self.offload_start_time: float | None = None
+        self.offload_wifi_start_time: float | None = None
+        self.offload_connected_time: float | None = None
+        self.offload_data_start_time: float | None = None
+        self.offload_end_time: float | None = None
+        self.offload_connection_duration: float | None = None
+        self.offload_transfer_duration: float | None = None
+        self.offload_events_count = 0
+        self.offload_last_status = "Idle"
+        self.offload_status = "Idle"  # "Idle", "Connecting...", "Transferring...", "Complete", "Failed", "Timeout"
 
         self.port_var     = tk.StringVar(value="")
         self.baud_var     = tk.StringVar(value="115200")
@@ -229,6 +258,46 @@ class MainWindow:
             text_color="#FEE2E2",
         )
         self.sidebar_status.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
+
+        self.sidebar_board_label = ctk.CTkLabel(
+            quick_status,
+            text="Selected Board: None",
+            text_color=("#475569", "#94A3B8"),
+            justify="left",
+            anchor="w",
+            wraplength=220,
+            font=ctk.CTkFont(size=12),
+        )
+        self.sidebar_board_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+
+        quick_btn_row = ctk.CTkFrame(quick_status, fg_color="transparent")
+        quick_btn_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 8))
+        quick_btn_row.grid_columnconfigure((0, 1), weight=1)
+        self.sidebar_connect_button = ctk.CTkButton(
+            quick_btn_row,
+            text="Connect",
+            fg_color=WABASH_BLUE,
+            hover_color=WABASH_BLUE_HOVER,
+            command=self._connect,
+        )
+        self.sidebar_connect_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.sidebar_disconnect_button = ctk.CTkButton(
+            quick_btn_row,
+            text="Disconnect",
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=self._disconnect,
+        )
+        self.sidebar_disconnect_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+        self.sidebar_auto_detect_button = ctk.CTkButton(
+            quick_status,
+            text="Auto Detect Transmitter",
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=self._auto_detect_board,
+        )
+        self.sidebar_auto_detect_button.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 14))
 
         self._build_dashboard_page()
         self._build_settings_page()
@@ -539,15 +608,25 @@ class MainWindow:
                                           values=['No ports found'])
         self.port_combo.grid(row=2, column=0, columnspan=2, sticky='ew',
                              padx=14, pady=(4, 6))
+        self.port_var.trace_add("write", lambda *_: self._update_port_selection_status())
+
+        self.port_detect_label = ctk.CTkLabel(
+            conn_card,
+            text='Board Detection: Unknown',
+            text_color=('#475569', '#94A3B8'),
+            justify='left',
+            anchor='w',
+        )
+        self.port_detect_label.grid(row=3, column=0, columnspan=2, sticky='ew', padx=14, pady=(0, 4))
 
         ctk.CTkLabel(conn_card, text='Baud',
                      text_color=('#475569', '#94A3B8')).grid(
-            row=3, column=0, columnspan=2, sticky='w', padx=14)
+            row=4, column=0, columnspan=2, sticky='w', padx=14)
         ctk.CTkEntry(conn_card, textvariable=self.baud_var).grid(
-            row=4, column=0, columnspan=2, sticky='ew', padx=14, pady=(4, 8))
+            row=5, column=0, columnspan=2, sticky='ew', padx=14, pady=(4, 8))
 
         btn_row = ctk.CTkFrame(conn_card, fg_color='transparent')
-        btn_row.grid(row=5, column=0, columnspan=2, sticky='ew',
+        btn_row.grid(row=6, column=0, columnspan=2, sticky='ew',
                      padx=14, pady=(0, 12))
         btn_row.grid_columnconfigure((0, 1, 2), weight=1)
         ctk.CTkButton(btn_row, text='Refresh',
@@ -649,7 +728,7 @@ class MainWindow:
         right = ctk.CTkFrame(page, corner_radius=0, fg_color='transparent')
         right.grid(row=0, column=1, sticky='nsew')
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(2, weight=1)
+        right.grid_rowconfigure(3, weight=1)
 
         # Header bar (title + connection badge)
         hdr = ctk.CTkFrame(right, corner_radius=14,
@@ -678,10 +757,70 @@ class MainWindow:
         self.tx_stat   = self._create_stat_card(stats, 1, 'TX', '0')
         self.rx_stat   = self._create_stat_card(stats, 2, 'RX', '0')
 
+        # Offload Status Card
+        offload_card = ctk.CTkFrame(right, corner_radius=14,
+                                    fg_color=(CARD_LIGHT, CARD_DARK))
+        offload_card.grid(row=2, column=0, sticky='ew', pady=(0, 10))
+        offload_card.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(offload_card, text='Data Offload Status',
+                     font=ctk.CTkFont(size=14, weight='bold')).grid(
+            row=0, column=0, sticky='w', padx=16, pady=(10, 4))
+
+        offload_metrics = ctk.CTkFrame(offload_card, fg_color='transparent')
+        offload_metrics.grid(row=1, column=0, sticky='ew', padx=16, pady=(0, 8))
+        offload_metrics.grid_columnconfigure(0, weight=1)
+        offload_metrics.grid_columnconfigure(1, weight=1)
+
+        left_metrics = ctk.CTkFrame(offload_metrics, fg_color='transparent')
+        left_metrics.grid(row=0, column=0, sticky='nw', padx=(0, 12))
+
+        right_metrics = ctk.CTkFrame(offload_metrics, fg_color='transparent')
+        right_metrics.grid(row=0, column=1, sticky='ne')
+
+        self.offload_status_label = ctk.CTkLabel(
+            left_metrics, text='Idle',
+            font=ctk.CTkFont(size=15, weight='bold'),
+            text_color=('#94A3B8', '#94A3B8'))
+        self.offload_status_label.grid(row=0, column=0, sticky='w', pady=(0, 3))
+        
+        self.offload_elapsed_label = ctk.CTkLabel(
+            left_metrics, text='Elapsed: —',
+            font=ctk.CTkFont(size=13),
+            text_color=('#64748B', '#9CA3AF'))
+        self.offload_elapsed_label.grid(row=1, column=0, sticky='w', pady=(0, 2))
+        
+        self.offload_duration_label = ctk.CTkLabel(
+            left_metrics, text='Transfer: —',
+            font=ctk.CTkFont(size=13),
+            text_color=('#64748B', '#9CA3AF'))
+        self.offload_duration_label.grid(row=2, column=0, sticky='w')
+        
+        self.offload_events_label = ctk.CTkLabel(
+            right_metrics, text='Events: 0',
+            font=ctk.CTkFont(size=13),
+            anchor='e',
+            text_color=('#64748B', '#9CA3AF'))
+        self.offload_events_label.grid(row=0, column=0, sticky='e', pady=(0, 3))
+        
+        self.offload_connection_label = ctk.CTkLabel(
+            right_metrics, text='Connection: —',
+            font=ctk.CTkFont(size=13),
+            anchor='e',
+            text_color=('#64748B', '#9CA3AF'))
+        self.offload_connection_label.grid(row=1, column=0, sticky='e', pady=(0, 2))
+        
+        self.offload_message_label = ctk.CTkLabel(
+            right_metrics, text='Last: —',
+            font=ctk.CTkFont(size=12),
+            text_color=('#64748B', '#9CA3AF'),
+            wraplength=280, justify='right', anchor='e')
+        self.offload_message_label.grid(row=2, column=0, sticky='e')
+
         # Log card
         log_card = ctk.CTkFrame(right, corner_radius=14,
                                 fg_color=(CARD_LIGHT, CARD_DARK))
-        log_card.grid(row=2, column=0, sticky='nsew')
+        log_card.grid(row=3, column=0, sticky='nsew')
         log_card.grid_columnconfigure(0, weight=1)
         log_card.grid_rowconfigure(2, weight=1)
 
@@ -741,7 +880,7 @@ class MainWindow:
         # Bottom bar: custom command + log tools
         bottom = ctk.CTkFrame(right, corner_radius=14,
                               fg_color=(CARD_LIGHT, CARD_DARK))
-        bottom.grid(row=3, column=0, sticky='ew', pady=(10, 0))
+        bottom.grid(row=4, column=0, sticky='ew', pady=(10, 0))
         bottom.grid_columnconfigure(0, weight=1)
 
         cmd_r = ctk.CTkFrame(bottom, fg_color='transparent')
@@ -841,7 +980,9 @@ class MainWindow:
             self.port_var.set(ports[0])
 
         if self.serial_service.is_connected:
-            self.port_stat.configure(text=current_port if current_port else "-")
+            self.port_stat.configure(text=self.connected_port if self.connected_port else "-")
+
+        self._update_port_selection_status()
 
     def _connect(self) -> None:
         port = self.port_var.get().strip()
@@ -855,35 +996,63 @@ class MainWindow:
             messagebox.showerror("Invalid Baud", "Baud rate must be an integer.")
             return
 
+        detected_role = self.detected_port_roles.get(port)
+        if detected_role is None or detected_role == "unknown":
+            detected_role = self._probe_port_role(port, baud)
+            self.detected_port_roles[port] = detected_role
+            self._update_port_selection_status()
+
+        if detected_role == "receiver":
+            self._set_connected_state(False, "-", role="disconnected")
+            messagebox.showwarning("Receiver Detected", "The selected port appears to be a receiver. Connect to the transmitter instead.")
+            return
+
         try:
             self.serial_service.connect(SerialConfig(port=port, baudrate=baud))
-            self._set_connected_state(True, port)
+            connection_role = detected_role if detected_role in {"transmitter", "unknown"} else "unknown"
+            self._set_connected_state(True, port, role=connection_role)
         except Exception as exc:
-            self._set_connected_state(False, "-")
+            self._set_connected_state(False, "-", role="disconnected")
             messagebox.showerror("Connection Error", str(exc))
 
     def _disconnect(self) -> None:
         self.serial_service.disconnect()
-        self._set_connected_state(False, "-")
+        self._set_connected_state(False, "-", role="disconnected")
 
-    def _set_connected_state(self, is_connected: bool, port_text: str) -> None:
+    def _set_connected_state(self, is_connected: bool, port_text: str, role: str = "unknown") -> None:
         self.connected = is_connected
+        self.connected_role = role if is_connected else "disconnected"
+        self.connected_port = port_text if is_connected else "-"
+
+        connect_fg = BTN_GREY if is_connected else WABASH_BLUE
+        connect_hover = BTN_GREY_HOVER if is_connected else WABASH_BLUE_HOVER
+        disconnect_fg = WABASH_BLUE if is_connected else BTN_GREY
+        disconnect_hover = WABASH_BLUE_HOVER if is_connected else BTN_GREY_HOVER
+
+        self.connect_button.configure(fg_color=connect_fg, hover_color=connect_hover)
+        self.disconnect_button.configure(fg_color=disconnect_fg, hover_color=disconnect_hover)
+        self.sidebar_connect_button.configure(fg_color=connect_fg, hover_color=connect_hover)
+        self.sidebar_disconnect_button.configure(fg_color=disconnect_fg, hover_color=disconnect_hover)
+
         if is_connected:
-            self.connection_badge.configure(text="Connected", fg_color="#14532D", text_color="#DCFCE7")
-            self.connect_button.configure(fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER)
-            self.disconnect_button.configure(fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER)
-            self.sidebar_status.configure(text="Connected", fg_color="#14532D", text_color="#DCFCE7")
-            self.db_tx_status.configure(text="Connected", text_color=("#22C55E", "#22C55E"))
+            if role == "transmitter":
+                self.connection_badge.configure(text="Connected", fg_color="#14532D", text_color="#DCFCE7")
+                self.sidebar_status.configure(text="Connected", fg_color="#14532D", text_color="#DCFCE7")
+                self.db_tx_status.configure(text="Connected", text_color=("#22C55E", "#22C55E"))
+            else:
+                self.connection_badge.configure(text="Verifying", fg_color="#92400E", text_color="#FEF3C7")
+                self.sidebar_status.configure(text="Verifying", fg_color="#92400E", text_color="#FEF3C7")
+                self.db_tx_status.configure(text="Unknown Board", text_color=("#F59E0B", "#F59E0B"))
         else:
             self.connection_badge.configure(text="Disconnected", fg_color="#7F1D1D", text_color="#FEE2E2")
-            self.connect_button.configure(fg_color=WABASH_BLUE, hover_color=WABASH_BLUE_HOVER)
-            self.disconnect_button.configure(fg_color=BTN_GREY, hover_color=BTN_GREY_HOVER)
             self.sidebar_status.configure(text="Disconnected", fg_color="#7F1D1D", text_color="#FEE2E2")
             self.db_tx_status.configure(text="Not Connected", text_color=("#EF4444", "#EF4444"))
             self.lora_active = False
             self.db_lora_status.configure(text="No Link", text_color=("#F59E0B", "#F59E0B"))
 
         self.port_stat.configure(text=port_text)
+        self._update_port_selection_status()
+        self._update_send_config_button()
         self._update_active_unit_display()
 
     def _send_quick(self, command: str) -> None:
@@ -896,8 +1065,8 @@ class MainWindow:
         self._send_payload(payload)
 
     def _send_payload(self, payload: str) -> None:
-        if not self.serial_service.is_connected:
-            messagebox.showwarning("Not Connected", "Connect to a serial port first.")
+        if not self._is_transmitter_connected():
+            messagebox.showwarning("Not Connected", "Connect to a transmitter first.")
             return
 
         try:
@@ -934,6 +1103,11 @@ class MainWindow:
         else:
             self.rx_count += 1
             self.rx_stat.configure(text=str(self.rx_count))
+            detected_role = self._role_from_banner(line)
+            if detected_role is not None and self.connected_port != "-":
+                self.detected_port_roles[self.connected_port] = detected_role
+                if self.connected_role != detected_role:
+                    self._set_connected_state(True, self.connected_port, role=detected_role)
             # Detect LoRa link from any receiver response
             if not self.lora_active and (
                 line.startswith("RSP:") or line.startswith("DATA:")
@@ -946,6 +1120,8 @@ class MainWindow:
                 truck_id = line[14:].strip()
                 if truck_id and truck_id not in self._scan_results:
                     self._scan_results.append(truck_id)
+            # Track offload progress
+            self._process_offload_message(line)
 
         # Each END:D marks a completed data offload from the receiver
         if line.startswith("END:D"):
@@ -964,6 +1140,9 @@ class MainWindow:
             line = self.serial_service.messages.get_nowait()
             self._append_log(line)
         self._update_active_unit_display()
+        # Periodically refresh offload status display if active
+        if self.offload_in_progress:
+            self._update_offload_status_display()
         self.root.after(100, self._pump_messages)
 
     def _clear_log(self) -> None:
@@ -979,6 +1158,12 @@ class MainWindow:
         self.db_log_count.configure(text="0")
         self.db_event_count.configure(text="0")
         self.db_last_message.configure(text="No messages yet")
+        # Reset offload stats when clearing log
+        self.offload_in_progress = False
+        self.offload_status = "Idle"
+        self.offload_last_status = "Idle"
+        self.offload_events_count = 0
+        self._update_offload_status_display()
         self.search_var.set("")
         self._activate_search_placeholder()
 
@@ -993,6 +1178,226 @@ class MainWindow:
 
         output = export_text_log(self.log_lines, Path(selected))
         messagebox.showinfo("Export Complete", f"Saved log to:\n{output}")
+
+    def _reset_offload_stats(self) -> None:
+        """Reset offload tracking statistics for a new offload attempt."""
+        self.offload_in_progress = True
+        self.offload_start_time = time.time()
+        self.offload_wifi_start_time = None
+        self.offload_connected_time = None
+        self.offload_data_start_time = None
+        self.offload_end_time = None
+        self.offload_connection_duration = None
+        self.offload_transfer_duration = None
+        self.offload_events_count = 0
+        self.offload_status = "Connecting..."
+        self.offload_last_status = "Offload started"
+        self._update_offload_status_display()
+
+    def _get_offload_status_color(self) -> tuple[str, str]:
+        return OFFLOAD_STATUS_COLORS.get(self.offload_status, ("#64748B", "#94A3B8"))
+
+    def _update_offload_status_display(self) -> None:
+        """Update the offload status card with current stats."""
+        elapsed_text = "Elapsed: —"
+        connection_text = "Connection: —"
+        transfer_text = "Transfer: —"
+
+        if not self.offload_in_progress:
+            # Show last result when idle — preserve event count from last transfer
+            self.offload_status_label.configure(
+                text=self.offload_status,
+                text_color=self._get_offload_status_color(),
+            )
+
+            if self.offload_end_time is not None:
+                elapsed_text = f"Elapsed: {self.offload_end_time:.1f}s"
+            if self.offload_connection_duration is not None:
+                connection_text = f"Connection: {self.offload_connection_duration:.1f}s"
+            if self.offload_transfer_duration is not None:
+                transfer_text = f"Transfer: {self.offload_transfer_duration:.1f}s"
+
+            self.offload_elapsed_label.configure(text=elapsed_text)
+            self.offload_duration_label.configure(text=transfer_text)
+            self.offload_connection_label.configure(text=connection_text)
+            events_text = f"Events: {self.offload_events_count}" if self.offload_events_count else "Events: —"
+            self.offload_events_label.configure(text=events_text)
+            self.offload_message_label.configure(text=f"Last: {self.offload_last_status}")
+            return
+
+        # Update ongoing offload stats
+        self.offload_status_label.configure(
+            text=self.offload_status,
+            text_color=self._get_offload_status_color(),
+        )
+
+        if self.offload_start_time:
+            elapsed = time.time() - self.offload_start_time
+            elapsed_text = f"Elapsed: {elapsed:.1f}s"
+
+        # Connection duration (from wifi start to connected)
+        if self.offload_wifi_start_time and self.offload_connected_time:
+            conn_dur = self.offload_connected_time - self.offload_wifi_start_time
+            connection_text = f"Connection: {conn_dur:.1f}s"
+
+        # Transfer duration (from data start to now)
+        if self.offload_data_start_time:
+            transfer_dur = time.time() - self.offload_data_start_time
+            transfer_text = f"Transfer: {transfer_dur:.1f}s"
+
+        self.offload_elapsed_label.configure(text=elapsed_text)
+        self.offload_connection_label.configure(text=connection_text)
+        self.offload_duration_label.configure(text=transfer_text)
+
+        # Events count
+        self.offload_events_label.configure(text=f"Events: {self.offload_events_count}")
+
+        # Last message
+        self.offload_message_label.configure(text=f"Last: {self.offload_last_status}")
+
+    def _process_offload_message(self, line: str) -> None:
+        """Parse offload-related messages and update tracking stats."""
+        # Offload start markers
+        if "RSP:BEGIN_D" in line or "BEGIN_D" in line:
+            self._reset_offload_stats()
+        # Wi-Fi start
+        elif "RSP:WIFI_START" in line or "WIFI_START" in line:
+            if not self.offload_in_progress:
+                self._reset_offload_stats()
+            self.offload_wifi_start_time = time.time()
+            self.offload_status = "Connecting..."
+            self.offload_last_status = "Wi-Fi starting"
+        # Wi-Fi connection attempts
+        elif "RSP:WIFI_TRY:" in line or "[WIFI_TRY]" in line:
+            self.offload_status = "Connecting..."
+            try:
+                if "RSP:WIFI_TRY:" in line:
+                    network = line.split("RSP:WIFI_TRY:")[-1].strip().rstrip("]")
+                else:
+                    network = line.split("[WIFI_TRY]")[-1].strip()
+                self.offload_last_status = f"Trying: {network}"
+            except:
+                self.offload_last_status = "Trying Wi-Fi..."
+        # Wi-Fi connected successfully
+        elif "RSP:WIFI_CONNECTED:" in line or "[RSP:WIFI_CONNECTED:" in line:
+            self.offload_status = "Connecting..."
+            try:
+                ssid = line.split("WIFI_CONNECTED:")[-1].strip().rstrip("]")
+                self.offload_last_status = f"WiFi connected: {ssid}"
+            except:
+                self.offload_last_status = "WiFi connected"
+        # TCP server ready
+        elif "RSP:WIFI_SERVER:" in line or "[WIFI_SERVER]" in line:
+            self.offload_status = "Connecting..."
+            self.offload_last_status = "TCP server ready"
+        # Transmitter connected to TCP (data transfer beginning)
+        elif "WIFI_TX_CONNECTED" in line or "RSP:WIFI_TX_CONNECTED" in line:
+            self.offload_connected_time = time.time()
+            self.offload_data_start_time = time.time()
+            if self.offload_wifi_start_time:
+                self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
+            self.offload_status = "Transferring..."
+            self.offload_last_status = "Transmitter connected"
+        # Wi-Fi countdown during TCP wait
+        elif "RSP:WIFI_WAIT:" in line or "[RSP:WIFI_WAIT:" in line:
+            try:
+                countdown = line.split("WIFI_WAIT:")[-1].strip().rstrip("]").split()[0]
+                self.offload_status = "Connecting..."
+                self.offload_last_status = f"Waiting... {countdown}s"
+            except:
+                pass
+        # Data rows: either classic DATA:/DATC: format or raw CSV data
+        elif line.startswith("DATA:") or line.startswith("DATC:"):
+            if self.offload_status != "Transferring...":
+                self.offload_data_start_time = time.time()
+                self.offload_status = "Transferring..."
+            self.offload_events_count += 1
+        # Raw data lines (numbers/CSV without DATA: prefix) during active transfer
+        # Handles both digit-prefixed values and quoted timestamps ("Time not set",...)
+        elif self.offload_in_progress and self.offload_data_start_time and line and (
+            line[0].isdigit() or line.startswith('"')
+        ):
+            if self.offload_status != "Transferring...":
+                self.offload_data_start_time = time.time()
+                self.offload_status = "Transferring..."
+            self.offload_events_count += 1
+        # TRANSFER summary message - arrives after END:D, update event count in last status
+        elif "[TRANSFER]" in line:
+            try:
+                if "duration=" in line:
+                    duration_str = line.split("duration=")[1].split()[0].strip().rstrip("ms")
+                    self.offload_transfer_duration = float(duration_str) / 1000.0
+                if "lines=" in line:
+                    lines_str = line.split("lines=")[1].split()[0].strip()
+                    self.offload_events_count = int(lines_str)
+                    # Update last_status to replace the "0 events" with the real count
+                    if self.offload_status == "Complete":
+                        self.offload_last_status = self.offload_last_status.rsplit(",", 1)[0] + f", {self.offload_events_count} events)"
+            except:
+                pass
+            self._update_offload_status_display()
+        # Offload complete
+        elif "END:D" in line:
+            if self.offload_in_progress:
+                total_dur = time.time() - self.offload_start_time if self.offload_start_time else 0
+                # Store timing info; real event count will be updated by [TRANSFER] shortly after
+                self.offload_end_time = total_dur
+                if self.offload_data_start_time:
+                    self.offload_transfer_duration = time.time() - self.offload_data_start_time
+                if self.offload_wifi_start_time and self.offload_connected_time:
+                    self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
+                self.offload_in_progress = False
+                self.offload_status = "Complete"
+                self.offload_last_status = f"Success ({total_dur:.1f}s, {self.offload_events_count} events)"
+                self._update_offload_status_display()
+        # Wi-Fi timeout
+        elif "RSP:WIFI_TX_TIMEOUT" in line or "WIFI_TX_TIMEOUT" in line:
+            if self.offload_in_progress:
+                total_dur = time.time() - self.offload_start_time if self.offload_start_time else 0
+                self.offload_end_time = total_dur
+                if self.offload_data_start_time:
+                    self.offload_transfer_duration = time.time() - self.offload_data_start_time
+                if self.offload_wifi_start_time and self.offload_connected_time:
+                    self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
+                self.offload_in_progress = False
+                self.offload_status = "Timeout"
+                self.offload_last_status = f"Wi-Fi timeout ({total_dur:.1f}s)"
+                self._update_offload_status_display()
+        # Wi-Fi connection failed
+        elif "RSP:WIFI_FAIL:" in line or "[WIFI_FAIL]" in line:
+            if self.offload_in_progress:
+                if self.offload_start_time:
+                    self.offload_end_time = time.time() - self.offload_start_time
+                if self.offload_wifi_start_time and self.offload_connected_time:
+                    self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
+                if self.offload_data_start_time:
+                    self.offload_transfer_duration = time.time() - self.offload_data_start_time
+                self.offload_in_progress = False
+                self.offload_status = "Failed"
+                try:
+                    if "RSP:WIFI_FAIL:" in line:
+                        network = line.split("RSP:WIFI_FAIL:")[-1].strip().rstrip("]")
+                    else:
+                        network = line.split("[WIFI_FAIL]")[-1].strip()
+                    self.offload_last_status = f"Wi-Fi failed: {network}"
+                except:
+                    self.offload_last_status = "Wi-Fi failed"
+                self._update_offload_status_display()
+        # Fallback to LoRa
+        elif "RSP:WIFI_FALLBACK_LORA" in line or "WIFI_FALLBACK_LORA" in line:
+            self.offload_status = "Fallback LoRa"
+            self.offload_last_status = "Switched to LoRa"
+        # No data to transfer
+        elif "RSP:NO_DATA" in line or "NO_DATA" in line:
+            if self.offload_in_progress:
+                total_dur = time.time() - self.offload_start_time if self.offload_start_time else 0
+                self.offload_end_time = total_dur
+                if self.offload_wifi_start_time and self.offload_connected_time:
+                    self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
+                self.offload_in_progress = False
+                self.offload_status = "No Data"
+                self.offload_last_status = f"No events to transfer ({total_dur:.1f}s)"
+                self._update_offload_status_display()
 
     def _get_selected_setup_mask(self) -> int:
         mask = 0
@@ -1034,8 +1439,8 @@ class MainWindow:
         if self.send_config_button is None:
             return
 
-        has_selection = self._get_selected_setup_mask() != 0
-        if has_selection:
+        ready_to_send = self._get_selected_setup_mask() != 0 and self._is_transmitter_connected()
+        if ready_to_send:
             self.send_config_button.configure(
                 state="normal",
                 fg_color=WABASH_BLUE,
@@ -1054,6 +1459,98 @@ class MainWindow:
     def _set_all_setup_selection(self, selected: bool) -> None:
         for var in self._setup_apply_vars:
             var.set(selected)
+
+    def _role_from_banner(self, line: str) -> str | None:
+        lowered = line.lower()
+        if "heltec lora transmitter bridge" in lowered:
+            return "transmitter"
+        if "heltec capstone receiver" in lowered:
+            return "receiver"
+        return None
+
+    def _is_transmitter_connected(self) -> bool:
+        return self.serial_service.is_connected and self.connected_role == "transmitter"
+
+    def _update_port_selection_status(self) -> None:
+        selected_port = self.port_var.get().strip()
+        role = self.detected_port_roles.get(selected_port, "unknown") if selected_port and selected_port != "No ports found" else "none"
+
+        if selected_port and selected_port != "No ports found":
+            if role == "transmitter":
+                text = f"Selected Board: Transmitter on {selected_port}"
+                conn_text = f"Board Detection: Transmitter on {selected_port}"
+            elif role == "receiver":
+                text = f"Selected Board: Receiver on {selected_port}"
+                conn_text = f"Board Detection: Receiver on {selected_port}"
+            else:
+                text = f"Selected Board: Unknown on {selected_port}"
+                conn_text = f"Board Detection: Unknown on {selected_port}"
+        else:
+            text = "Selected Board: None"
+            conn_text = "Board Detection: Unknown"
+
+        if hasattr(self, "sidebar_board_label"):
+            self.sidebar_board_label.configure(text=text)
+        if hasattr(self, "port_detect_label"):
+            self.port_detect_label.configure(text=conn_text)
+
+    def _probe_port_role(self, port: str, baudrate: int = 115200) -> str:
+        try:
+            with serial.Serial(port=port, baudrate=baudrate, timeout=0.2, write_timeout=0.2) as ser:
+                try:
+                    ser.reset_input_buffer()
+                    ser.setDTR(False)
+                    ser.setRTS(False)
+                    time.sleep(0.05)
+                    ser.setDTR(True)
+                except Exception:
+                    pass
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    raw = ser.readline()
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    detected_role = self._role_from_banner(line)
+                    if detected_role is not None:
+                        return detected_role
+        except Exception:
+            return "unknown"
+
+        return "unknown"
+
+    def _auto_detect_board(self) -> None:
+        ports = [port.device for port in list_ports.comports()]
+        if not ports:
+            messagebox.showwarning("No Ports", "No serial boards were detected.")
+            return
+
+        found_transmitter: str | None = None
+        found_receiver: str | None = None
+        for port in ports:
+            role = self._probe_port_role(port)
+            self.detected_port_roles[port] = role
+            if role == "transmitter" and found_transmitter is None:
+                found_transmitter = port
+            elif role == "receiver" and found_receiver is None:
+                found_receiver = port
+
+        self._refresh_ports()
+
+        if found_transmitter is not None:
+            self.port_var.set(found_transmitter)
+            self._append_log(f"[AUTO_DETECT] Transmitter detected on {found_transmitter}")
+            return
+
+        if found_receiver is not None:
+            self.port_var.set(found_receiver)
+            self._append_log(f"[AUTO_DETECT] Receiver detected on {found_receiver}")
+            messagebox.showwarning("Receiver Detected", "A receiver was detected, but the interface requires a transmitter connection.")
+            return
+
+        self._append_log("[AUTO_DETECT] Unable to determine board type for detected ports.")
+        messagebox.showwarning("Auto Detect", "Board(s) were found, but the role could not be verified from serial output.")
 
     def _build_unit_setup_page(self) -> None:
         page = ctk.CTkScrollableFrame(
@@ -1182,10 +1679,10 @@ class MainWindow:
         ).grid(row=2, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
 
         desc_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        desc_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
+        desc_card.grid(row=5, column=0, sticky="ew", pady=(0, 12))
         ctk.CTkLabel(
             desc_card,
-            text="Select the fields to include above. Unselected values are left unchanged on the receiver. Selecting Wi-Fi with blank SSID/password clears the stored Wi-Fi network.",
+            text="Select the fields to include above. Unselected values are left unchanged on the receiver. Selecting Wi-Fi with blank SSID/password clears the stored Wi-Fi network. To send a configuration, at least one field must be selected and you must be connected to a transmitter.",
             wraplength=1100,
             justify="left",
             text_color=("#334155", "#CBD5E1"),
@@ -1193,7 +1690,7 @@ class MainWindow:
         ).grid(row=0, column=0, sticky="w", padx=16, pady=12)
 
         update_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        update_card.grid(row=5, column=0, sticky="ew", pady=(0, 12))
+        update_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
         update_card.grid_columnconfigure((0, 1, 2), weight=1)
 
         ctk.CTkLabel(
@@ -1259,8 +1756,8 @@ class MainWindow:
         self._update_send_config_button()
 
     def _send_unit_config(self) -> None:
-        if not self.serial_service.is_connected:
-            messagebox.showwarning("Not Connected", "Connect to a serial port first.")
+        if not self._is_transmitter_connected():
+            messagebox.showwarning("Not Connected", "Connect to a transmitter first.")
             return
 
         try:
@@ -1398,7 +1895,7 @@ class MainWindow:
             self._fleet_rows.append(cols)
 
     def _run_connection_scan(self) -> None:
-        if not self.serial_service.is_connected:
+        if not self._is_transmitter_connected():
             messagebox.showwarning("Not Connected", "Connect to a transmitter first.")
             return
         self._scan_results.clear()

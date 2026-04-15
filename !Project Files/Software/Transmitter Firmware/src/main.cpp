@@ -125,6 +125,15 @@ void parseAndStoreWifiProfiles(const String& packet) {
 }
 
 bool connectTransmitterWiFi() {
+  int configuredProfiles = 0;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (t_wifiSsids[i].length() > 0) configuredProfiles++;
+  }
+  if (configuredProfiles == 0) {
+    Serial.println("[WIFI_TX_FAIL] No WiFi profiles loaded on transmitter. Send setup with Wi-Fi selected.");
+    return false;
+  }
+
   for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
     if (t_wifiSsids[i].length() == 0) continue;
     Serial.printf("[WIFI_TRY] %s\n", t_wifiSsids[i].c_str());

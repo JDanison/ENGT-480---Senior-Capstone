@@ -9,8 +9,18 @@ For Data Purposes:
 5) LoRa to offload rather than Wi-Fi | Maybe both?
 
 TODO Order:
-1) Make sure the Python Application can be offloaded and downloaded / working on other computers.
-2) Customization inputs 
-3) Polishing the data offloading process
-4) Wi-Fi Mode
-5) Switch to Blue/White/Yellow - Done (4/2/26)
+Continue - Updating the Data Offload terminal screen. Looks strange, and doesn't entirely work.
+
+Store the known units in the dashboard locally. Store the Wi-Fi credentials locally.
+
+1) Time Sync Button & Functionality
+2) Unit Tare Button & Funcationality
+3) Saving Data to App Data / Locally Selected Location
+4) Way to visualize / view the data?
+
+Not! Wabash National anymore. Just Wabash.
+
+As walking through the steps, make documentation.
+
+NetHouse
+@AAMBN3Ts4G0od$&

@@ -210,6 +210,10 @@ bool parseSetupPacket(const String& packet) {
   float nextThreshold = ACCEL_THRESHOLD;
   unsigned int nextSampleRate = LAB_TEST_SAMPLE_RATE_HZ;
   unsigned long nextDuration = EVENT_CAPTURE_DURATION_MS;
+  bool sawInterval = false;
+  bool sawThreshold = false;
+  bool sawSampleRate = false;
+  bool sawDuration = false;
   bool includeTruckId = g_includeTruckId;
   bool includeDescription = g_includeDescription;
   String truckId = g_truckId;
@@ -240,12 +244,8 @@ bool parseSetupPacket(const String& packet) {
       value.trim();
 
       if (key == "si") {
-        unsigned long v = value.toInt();
-        if (v < 1 || v > 10000) {
-          Serial.println("ERROR: Sensor interval out of range (1-10000 ms)");
-          return false;
-        }
-        nextInterval = v;
+        nextInterval = value.toInt();
+        sawInterval = true;
       } else if (key == "m") {
         unsigned long v = value.toInt();
         if (v > 127) {
@@ -255,26 +255,14 @@ bool parseSetupPacket(const String& packet) {
         setupMask = (uint8_t)v;
         maskProvided = true;
       } else if (key == "thr") {
-        float v = value.toFloat();
-        if (v <= 0.0f || v > 10.0f) {
-          Serial.println("ERROR: Event trigger threshold out of range (0-10 g]");
-          return false;
-        }
-        nextThreshold = v;
+        nextThreshold = value.toFloat();
+        sawThreshold = true;
       } else if (key == "sr") {
-        int v = value.toInt();
-        if (v != 10 && v != 20) {
-          Serial.println("ERROR: Sample rate must be 10 or 20 Hz");
-          return false;
-        }
-        nextSampleRate = (unsigned int)v;
+        nextSampleRate = (unsigned int)value.toInt();
+        sawSampleRate = true;
       } else if (key == "dur") {
-        unsigned long v = value.toInt();
-        if (v < 1 || v > 10000) {
-          Serial.println("ERROR: Event capture duration out of range (1-10000 ms)");
-          return false;
-        }
-        nextDuration = v;
+        nextDuration = value.toInt();
+        sawDuration = true;
       } else if (key == "ti") {
         includeTruckId = (value == "1");
       } else if (key == "tid") {
@@ -296,6 +284,32 @@ bool parseSetupPacket(const String& packet) {
     }
 
     start = sep + 1;
+  }
+
+  // Validate only fields that are explicitly selected by setup mask.
+  if ((setupMask & SETUP_MASK_SENSOR_INTERVAL) && sawInterval) {
+    if (nextInterval < 1 || nextInterval > 10000) {
+      Serial.println("ERROR: Sensor interval out of range (1-10000 ms)");
+      return false;
+    }
+  }
+  if ((setupMask & SETUP_MASK_THRESHOLD) && sawThreshold) {
+    if (nextThreshold <= 0.0f || nextThreshold > 10.0f) {
+      Serial.println("ERROR: Event trigger threshold out of range (0-10 g]");
+      return false;
+    }
+  }
+  if ((setupMask & SETUP_MASK_SAMPLE_RATE) && sawSampleRate) {
+    if (nextSampleRate != 10 && nextSampleRate != 20) {
+      Serial.println("ERROR: Sample rate must be 10 or 20 Hz");
+      return false;
+    }
+  }
+  if ((setupMask & SETUP_MASK_DURATION) && sawDuration) {
+    if (nextDuration < 1 || nextDuration > 10000) {
+      Serial.println("ERROR: Event capture duration out of range (1-10000 ms)");
+      return false;
+    }
   }
 
   if (setupMask & SETUP_MASK_SENSOR_INTERVAL) {
@@ -477,8 +491,15 @@ bool startWifiLocalOffload() {
   // Wait for the transmitter to connect (generous timeout for its WiFi connect + TCP connect)
   WiFiClient client;
   unsigned long serverStart = millis();
+  int lastRemaining = -1;
   while (!client) {
     client = server.available();
+    int elapsedSec = (int)((millis() - serverStart) / 1000UL);
+    int remainingSec = WIFI_CLIENT_TIMEOUT_SEC - elapsedSec;
+    if (remainingSec != lastRemaining && remainingSec >= 0) {
+      sendLoRaMessage("RSP:WIFI_WAIT:" + String(remainingSec));
+      lastRemaining = remainingSec;
+    }
     if (millis() - serverStart > (WIFI_CLIENT_TIMEOUT_SEC * 1000UL)) {
       sendLoRaMessage("RSP:WIFI_TX_TIMEOUT");
       server.close();
