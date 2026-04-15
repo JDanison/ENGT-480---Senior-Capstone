@@ -88,6 +88,10 @@ class MainWindow:
         self.include_description_var = tk.BooleanVar(value=False)
         self.description_var = tk.StringVar(value="")
 
+        # Wi-Fi credential slot (sent to receiver for Wi-Fi-first offload)
+        self.wifi1_ssid_var = tk.StringVar(value="")
+        self.wifi1_password_var = tk.StringVar(value="")
+
         self.pages: dict[str, ctk.CTkFrame] = {}
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
 
@@ -111,7 +115,7 @@ class MainWindow:
         self.root.grid_columnconfigure(1, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
-        sidebar = ctk.CTkFrame(self.root, width=320, corner_radius=0, fg_color=("#E5E7EB", "#0B1220"))
+        sidebar = ctk.CTkFrame(self.root, width=280, corner_radius=0, fg_color=("#E5E7EB", "#0B1220"))
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
         sidebar.grid_columnconfigure(0, weight=1)
@@ -123,7 +127,7 @@ class MainWindow:
 
         ctk.CTkLabel(
             sidebar,
-            text="WABASH NATIONAL",
+            text="WABASH",
             font=ctk.CTkFont(size=28, weight="bold"),
             text_color=WABASH_BLUE,
         ).grid(row=0, column=0, sticky="w", padx=24, pady=(28, 4))
@@ -239,7 +243,7 @@ class MainWindow:
             row=0, column=0, sticky="w", padx=18, pady=14
         )
         ctk.CTkLabel(
-            header, text="WABASH NATIONAL", text_color=WABASH_BLUE, font=ctk.CTkFont(size=14, weight="bold")
+            header, text="WABASH", text_color=WABASH_BLUE, font=ctk.CTkFont(size=14, weight="bold")
         ).grid(row=0, column=1, sticky="e", padx=18, pady=14)
 
         # ── System Status Cards ──────────────────────────────────────────────
@@ -973,6 +977,12 @@ class MainWindow:
         info_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         info_card.grid_columnconfigure(1, weight=1)
 
+        ctk.CTkLabel(
+            info_card,
+            text="Truck Identification",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 6))
+
         self.include_truck_id_cb = ctk.CTkCheckBox(
             info_card,
             text="Include Truck ID",
@@ -982,12 +992,12 @@ class MainWindow:
             fg_color=WABASH_BLUE,
             hover_color=WABASH_BLUE_HOVER,
         )
-        self.include_truck_id_cb.grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
+        self.include_truck_id_cb.grid(row=1, column=0, sticky="w", padx=16, pady=6)
         ctk.CTkEntry(
             info_card,
             textvariable=self.truck_id_var,
             placeholder_text="Truck ID",
-        ).grid(row=0, column=1, sticky="ew", padx=(6, 16), pady=(14, 6))
+        ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=6)
 
         self.include_description_cb = ctk.CTkCheckBox(
             info_card,
@@ -998,19 +1008,25 @@ class MainWindow:
             fg_color=WABASH_BLUE,
             hover_color=WABASH_BLUE_HOVER,
         )
-        self.include_description_cb.grid(row=1, column=0, sticky="w", padx=16, pady=(6, 14))
+        self.include_description_cb.grid(row=2, column=0, sticky="w", padx=16, pady=(6, 14))
         ctk.CTkEntry(
             info_card,
             textvariable=self.description_var,
             placeholder_text="Description",
-        ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
+        ).grid(row=2, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
 
         config_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         config_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         config_card.grid_columnconfigure(1, weight=1)
 
+        ctk.CTkLabel(
+            config_card,
+            text="Sensor Configuration",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 6))
+
         ctk.CTkLabel(config_card, text="Sensor Read Interval (ms)", text_color=("#475569", "#94A3B8")).grid(
-            row=0, column=0, sticky="w", padx=16, pady=(14, 6)
+            row=1, column=0, sticky="w", padx=16, pady=6
         )
         ctk.CTkOptionMenu(
             config_card,
@@ -1019,10 +1035,10 @@ class MainWindow:
             fg_color=WABASH_BLUE,
             button_color=WABASH_BLUE_HOVER,
             button_hover_color=WABASH_BLUE_HOVER,
-        ).grid(row=0, column=1, sticky="ew", padx=(6, 16), pady=(14, 6))
+        ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=6)
 
         ctk.CTkLabel(config_card, text="Strain Gauge Poll Rate (Hz)", text_color=("#475569", "#94A3B8")).grid(
-            row=1, column=0, sticky="w", padx=16, pady=6
+            row=2, column=0, sticky="w", padx=16, pady=6
         )
         ctk.CTkOptionMenu(
             config_card,
@@ -1031,35 +1047,65 @@ class MainWindow:
             fg_color=WABASH_BLUE,
             button_color=WABASH_BLUE_HOVER,
             button_hover_color=WABASH_BLUE_HOVER,
-        ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=6)
+        ).grid(row=2, column=1, sticky="ew", padx=(6, 16), pady=6)
 
         ctk.CTkLabel(config_card, text="Event Trigger Threshold (g's)", text_color=("#475569", "#94A3B8")).grid(
-            row=2, column=0, sticky="w", padx=16, pady=6
+            row=3, column=0, sticky="w", padx=16, pady=6
         )
         ctk.CTkEntry(
             config_card,
             textvariable=self.event_trigger_threshold_var,
             placeholder_text="Example: 2.0",
-        ).grid(row=2, column=1, sticky="ew", padx=(6, 16), pady=6)
+        ).grid(row=3, column=1, sticky="ew", padx=(6, 16), pady=6)
 
         ctk.CTkLabel(config_card, text="Event Capture Duration (ms)", text_color=("#475569", "#94A3B8")).grid(
-            row=3, column=0, sticky="w", padx=16, pady=(6, 14)
+            row=4, column=0, sticky="w", padx=16, pady=(6, 14)
         )
         ctk.CTkEntry(
             config_card,
             textvariable=self.event_duration_var,
             placeholder_text="Example: 2000",
-        ).grid(row=3, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
+        ).grid(row=4, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
+
+        wifi_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        wifi_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        wifi_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            wifi_card,
+            text="Wi-Fi Offload Network",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 6))
+
+        ctk.CTkLabel(wifi_card, text="SSID", text_color=("#475569", "#94A3B8")).grid(
+            row=1, column=0, sticky="w", padx=16, pady=6
+        )
+        ctk.CTkEntry(
+            wifi_card,
+            textvariable=self.wifi1_ssid_var,
+            placeholder_text="Wi-Fi SSID",
+        ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=6)
+
+        ctk.CTkLabel(wifi_card, text="Password", text_color=("#475569", "#94A3B8")).grid(
+            row=2, column=0, sticky="w", padx=16, pady=(6, 14)
+        )
+        ctk.CTkEntry(
+            wifi_card,
+            textvariable=self.wifi1_password_var,
+            placeholder_text="Wi-Fi Password",
+            show="*",
+        ).grid(row=2, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
 
         desc_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
-        desc_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        desc_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
         ctk.CTkLabel(
             desc_card,
-            text="Truck ID and Description are optional and only sent when their checkbox is checked.",
-            wraplength=760,
+            text="Truck ID/Description are optional. The Wi-Fi network is stored on the receiver SD card and used first during Request Data before LoRa fallback.",
+            wraplength=1100,
+            justify="left",
             text_color=("#334155", "#CBD5E1"),
             font=ctk.CTkFont(size=12),
-        ).grid(row=0, column=0, sticky="ew", padx=16, pady=12)
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=12)
 
         ctk.CTkButton(
             page,
@@ -1069,7 +1115,7 @@ class MainWindow:
             hover_color=WABASH_BLUE_HOVER,
             font=ctk.CTkFont(size=14, weight="bold"),
             height=40,
-        ).grid(row=4, column=0, sticky="ew")
+        ).grid(row=5, column=0, sticky="ew")
 
     def _send_unit_config(self) -> None:
         if not self.serial_service.is_connected:
@@ -1088,6 +1134,9 @@ class MainWindow:
             truck_id = self.truck_id_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
             description = self.description_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
 
+            wifi_ssid = self.wifi1_ssid_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
+            wifi_password = self.wifi1_password_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
+
             if include_truck and not truck_id:
                 messagebox.showwarning("Missing Truck ID", "Truck ID checkbox is enabled, but Truck ID is empty.")
                 return
@@ -1096,13 +1145,42 @@ class MainWindow:
                 messagebox.showwarning("Missing Description", "Description checkbox is enabled, but Description is empty.")
                 return
 
+            if wifi_password and not wifi_ssid:
+                messagebox.showwarning(
+                    "Wi-Fi Setup Error",
+                    "Wi-Fi password is set, but the SSID is empty.",
+                )
+                return
+
+            wifi_fields = [
+                f"w0s={wifi_ssid}",
+                f"w0p={wifi_password}",
+                "w1s=",
+                "w1p=",
+                "w2s=",
+                "w2p=",
+            ]
+
             packet = (
                 f"SETUP:si={interval};thr={threshold};sr={sample_rate};dur={duration};"
                 f"ti={1 if include_truck else 0};tid={truck_id if include_truck else ''};"
-                f"di={1 if include_desc else 0};desc={description if include_desc else ''}"
+                f"di={1 if include_desc else 0};desc={description if include_desc else ''};"
+                + ";".join(wifi_fields)
             )
+
+            # Transmitter forwards SETUP in one LoRa frame, so keep payload conservative.
+            if len(packet.encode("utf-8")) > 220:
+                messagebox.showwarning(
+                    "Setup Too Large",
+                    "Configuration is too large for a single LoRa setup packet. "
+                    "Shorten SSID/password/description values and try again.",
+                )
+                return
+
             wire_payload = f"{packet}\n"
             self.serial_service.send_text(wire_payload)
+
+            wifi_configured = 1 if wifi_ssid else 0
 
             messagebox.showinfo(
                 "Configuration Sent",
@@ -1112,7 +1190,8 @@ class MainWindow:
                 f"Strain Gauge Poll Rate: {sample_rate}Hz\n"
                 f"Event Duration: {duration}ms\n"
                 f"Truck ID Included: {'Yes' if include_truck else 'No'}\n"
-                f"Description Included: {'Yes' if include_desc else 'No'}"
+                f"Description Included: {'Yes' if include_desc else 'No'}\n"
+                f"Wi-Fi Network Saved: {wifi_configured}"
             )
         except ValueError:
             messagebox.showerror("Invalid Input", "Threshold and duration must be numeric values.")
@@ -1234,7 +1313,7 @@ class MainWindow:
             btn.configure(state="normal",
                           fg_color=WABASH_BLUE,
                           hover_color=WABASH_BLUE_HOVER)
-        self._append_log(f"[Status] Active unit set to: {unit_id}", "status")
+        self._append_log(f"[Status] Active unit set to: {unit_id}")
 
     def _on_close(self) -> None:
         self.serial_service.disconnect()

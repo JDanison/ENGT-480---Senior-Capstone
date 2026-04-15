@@ -93,6 +93,13 @@ extern unsigned int LAB_TEST_SAMPLE_RATE_HZ;    // Lab test sampling rate (10 or
 #define GMT_OFFSET_SEC          -18000                  // EST = GMT-5 (5 hours * 3600 seconds)
 #define DAYLIGHT_OFFSET_SEC     3600                    // Daylight saving time offset (1 hour)
 
+// WiFi peer-to-peer offload profile storage
+#define MAX_WIFI_PROFILES        3
+#define WIFI_PROFILE_FILE        "/wifi/profiles.txt"
+#define WIFI_CONNECT_TIMEOUT_SEC 8
+#define WIFI_SERVER_PORT         8080
+#define WIFI_CLIENT_TIMEOUT_SEC  35   // Seconds receiver waits for transmitter TCP connection
+
 
 /**
  * Global Objects (External Declarations)
@@ -120,6 +127,9 @@ void playbackEvents();
 bool syncTime();
 String getFormattedTime();
 void offloadData();
+bool startWifiLocalOffload();
+void loadWiFiProfilesFromSd();
+bool saveWiFiProfilesToSd();
 
 // Configuration functions
 bool parseSetupPacket(const String& packet);

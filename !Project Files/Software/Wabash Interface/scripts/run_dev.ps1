@@ -6,14 +6,30 @@ Param(
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
+function Test-EditableInstall {
+    $packagePath = & .\.venv\Scripts\python.exe -c "import pathlib, wabash_interface; print(pathlib.Path(wabash_interface.__file__).resolve())"
+    if ($LASTEXITCODE -ne 0) {
+        return $false
+    }
+
+    $expectedRoot = (Resolve-Path ".\src\wabash_interface").Path
+    return $packagePath.Trim().StartsWith($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 if (-not (Test-Path ".venv")) {
     & $Python -m venv .venv
 }
 
 $depsMarker = ".venv\.deps-installed"
+$needsEditableRefresh = $false
 
-# Only install dependencies if marker doesn't exist or -ForceDeps is specified
-if (-not (Test-Path $depsMarker) -or $ForceDeps) {
+if (Test-Path ".venv") {
+    $needsEditableRefresh = -not (Test-EditableInstall)
+}
+
+# Only install dependencies if marker doesn't exist, -ForceDeps is specified,
+# or the package is not currently resolving from the editable src tree.
+if (-not (Test-Path $depsMarker) -or $ForceDeps -or $needsEditableRefresh) {
     Write-Host "Installing dependencies..." -ForegroundColor Cyan
     & .\.venv\Scripts\python.exe -m pip install --upgrade pip
     & .\.venv\Scripts\python.exe -m pip install -e .

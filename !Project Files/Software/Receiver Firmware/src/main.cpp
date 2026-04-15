@@ -39,6 +39,11 @@ String g_truckId = "";
 bool g_includeTruckId = false;
 // ===================================================================
 
+// ===== WiFi Offload Profiles (set via SETUP packet or loaded from SD) =====
+String g_wifiSsids[MAX_WIFI_PROFILES];
+String g_wifiPasswords[MAX_WIFI_PROFILES];
+// ===========================================================================
+
 void processSerialCommand(char command);
 
 #if defined(ESP8266) || defined(ESP32)
@@ -160,6 +165,28 @@ bool saveTruckInfoToSd(const String& truckId, const String& description, bool in
   return ok;
 }
 
+bool saveWiFiProfilesToSd() {
+  if (!sdCard.isInitialized()) {
+    Serial.println("WiFi profiles not saved: SD card not initialized.");
+    return false;
+  }
+
+  String content = "# WiFi Profiles\n";
+  content += "updated=" + getFormattedTime() + "\n";
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    content += "w" + String(i) + "_ssid=" + g_wifiSsids[i] + "\n";
+    content += "w" + String(i) + "_pass=" + g_wifiPasswords[i] + "\n";
+  }
+
+  bool ok = sdCard.writeFile(WIFI_PROFILE_FILE, content.c_str(), false);
+  if (ok) {
+    Serial.printf("WiFi profiles saved: %s\n", WIFI_PROFILE_FILE);
+  } else {
+    Serial.println("WiFi profile save failed.");
+  }
+  return ok;
+}
+
 bool parseSetupPacket(const String& packet) {
   if (!packet.startsWith("SETUP:")) {
     return false;
@@ -176,6 +203,13 @@ bool parseSetupPacket(const String& packet) {
   bool includeDescription = false;
   String truckId = "";
   String description = "";
+  String nextSsids[MAX_WIFI_PROFILES];
+  String nextPasswords[MAX_WIFI_PROFILES];
+
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    nextSsids[i] = "";
+    nextPasswords[i] = "";
+  }
 
   int start = 0;
   while (start < data.length()) {
@@ -228,6 +262,15 @@ bool parseSetupPacket(const String& packet) {
         includeDescription = (value == "1");
       } else if (key == "desc") {
         description = value;
+      } else if (key.length() == 3 && key.charAt(0) == 'w' && isDigit(key.charAt(1))) {
+        int idx = key.charAt(1) - '0';
+        if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
+          if (key.charAt(2) == 's') {
+            nextSsids[idx] = value;
+          } else if (key.charAt(2) == 'p') {
+            nextPasswords[idx] = value;
+          }
+        }
       }
     }
 
@@ -245,6 +288,11 @@ bool parseSetupPacket(const String& packet) {
     g_truckId = truckId;
   }
 
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    g_wifiSsids[i] = nextSsids[i];
+    g_wifiPasswords[i] = nextPasswords[i];
+  }
+
   Serial.println("SETUP applied:");
   Serial.printf("  SENSOR_READ_INTERVAL: %lu ms\n", SENSOR_READ_INTERVAL);
   Serial.printf("  EVENT_TRIGGER_THRESHOLD: %.3f g\n", ACCEL_THRESHOLD);
@@ -255,6 +303,191 @@ bool parseSetupPacket(const String& packet) {
     Serial.println("SETUP warning: truck info requested but not saved.");
   }
 
+  if (!saveWiFiProfilesToSd()) {
+    Serial.println("SETUP warning: WiFi profiles were not saved.");
+  }
+
+  int wifiConfigured = 0;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (g_wifiSsids[i].length() > 0) {
+      wifiConfigured++;
+      Serial.printf("  WiFi[%d]: %s\n", i + 1, g_wifiSsids[i].c_str());
+    }
+  }
+  Serial.printf("  WiFi profiles configured: %d\n", wifiConfigured);
+
+  return true;
+}
+
+void loadWiFiProfilesFromSd() {
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    g_wifiSsids[i] = "";
+    g_wifiPasswords[i] = "";
+  }
+
+  if (!sdCard.isInitialized() || !sdCard.fileExists(WIFI_PROFILE_FILE)) {
+    return;
+  }
+
+  File f = SD.open(WIFI_PROFILE_FILE, FILE_READ);
+  if (!f) {
+    return;
+  }
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    line.trim();
+    if (line.length() == 0 || line.startsWith("#")) {
+      continue;
+    }
+
+    int eq = line.indexOf('=');
+    if (eq <= 0) {
+      continue;
+    }
+
+    String key = line.substring(0, eq);
+    String value = line.substring(eq + 1);
+    key.trim();
+    value.trim();
+
+    if (key.length() == 7 && key.charAt(0) == 'w' && isDigit(key.charAt(1)) && key.endsWith("_ssid")) {
+      int idx = key.charAt(1) - '0';
+      if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
+        g_wifiSsids[idx] = value;
+      }
+    } else if (key.length() == 7 && key.charAt(0) == 'w' && isDigit(key.charAt(1)) && key.endsWith("_pass")) {
+      int idx = key.charAt(1) - '0';
+      if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
+        g_wifiPasswords[idx] = value;
+      }
+    }
+  }
+
+  f.close();
+
+  int loaded = 0;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (g_wifiSsids[i].length() > 0) {
+      loaded++;
+    }
+  }
+  Serial.printf("WiFi profiles loaded: %d\n", loaded);
+}
+
+bool startWifiLocalOffload() {
+  int configuredProfiles = 0;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (g_wifiSsids[i].length() > 0) configuredProfiles++;
+  }
+  if (configuredProfiles == 0) {
+    sendLoRaMessage("RSP:WIFI_NONE_CONFIGURED");
+    return false;
+  }
+
+  sendLoRaMessage("RSP:WIFI_START");
+
+  // Try each stored network in order
+  bool wifiConnected = false;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    String ssid = g_wifiSsids[i];
+    if (ssid.length() == 0) continue;
+
+    sendLoRaMessage("RSP:WIFI_TRY:" + ssid);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), g_wifiPasswords[i].c_str());
+
+    int timeout = WIFI_CONNECT_TIMEOUT_SEC;
+    while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+      delay(1000);
+      timeout--;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      sendLoRaMessage("RSP:WIFI_CONNECTED:" + ssid);
+      wifiConnected = true;
+      break;
+    }
+    sendLoRaMessage("RSP:WIFI_FAIL:" + ssid);
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+
+  if (!wifiConnected) {
+    sendLoRaMessage("RSP:WIFI_FALLBACK_LORA");
+    return false;
+  }
+
+  // Open a local TCP server for the transmitter to connect to
+  WiFiServer server(WIFI_SERVER_PORT);
+  server.begin();
+  String myIp = WiFi.localIP().toString();
+  sendLoRaMessage("RSP:WIFI_SERVER:" + myIp + ":" + String(WIFI_SERVER_PORT));
+  Serial.printf("WiFi TCP server started at %s:%d\n", myIp.c_str(), WIFI_SERVER_PORT);
+
+  // Wait for the transmitter to connect (generous timeout for its WiFi connect + TCP connect)
+  WiFiClient client;
+  unsigned long serverStart = millis();
+  while (!client) {
+    client = server.available();
+    if (millis() - serverStart > (WIFI_CLIENT_TIMEOUT_SEC * 1000UL)) {
+      sendLoRaMessage("RSP:WIFI_TX_TIMEOUT");
+      server.close();
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+      sendLoRaMessage("RSP:WIFI_FALLBACK_LORA");
+      return false;
+    }
+    delay(100);
+  }
+
+  sendLoRaMessage("RSP:WIFI_TX_CONNECTED");
+  Serial.println("Transmitter TCP connected, streaming events...");
+
+  // Stream all stored events over TCP using DATA: lines
+  // TCP has no 180-byte packet limit so full lines can be sent without chunking
+  if (sdCard.isInitialized() && sdCard.fileExists("/events")) {
+    File root = SD.open("/events");
+    if (root && root.isDirectory()) {
+      File file = root.openNextFile();
+      while (file) {
+        if (!file.isDirectory()) {
+          String filename = String(file.name());
+          String baseName = filename;
+          int slashIdx = baseName.lastIndexOf('/');
+          if (slashIdx >= 0 && slashIdx < (baseName.length() - 1)) {
+            baseName = baseName.substring(slashIdx + 1);
+          }
+          if (baseName.startsWith("event ") && baseName.endsWith(".csv")) {
+            while (file.available()) {
+              String line = file.readStringUntil('\n');
+              line.replace("\r", "");
+              line.trim();
+              if (line.length() == 0 || line.startsWith("timestamp,")) continue;
+              client.println("DATA:" + line);
+              delay(5);
+            }
+          }
+          file.close();
+        } else {
+          file.close();
+        }
+        file = root.openNextFile();
+      }
+      root.close();
+    }
+  }
+
+  // End-of-transfer marker read by transmitter to trigger END:D on serial
+  client.println("END:D");
+  client.flush();
+  delay(500);
+  client.stop();
+  server.close();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  Serial.println("WiFi TCP offload complete.");
   return true;
 }
 
@@ -278,11 +511,16 @@ void handleLoRaCommandPacket(const String& packet) {
 
   if (command == 'd' || command == 'D') {
     sendLoRaMessage("RSP:BEGIN_D");
-    bool sentData = streamStoredEventsOverLoRa();
-    if (!sentData) {
-      sendLoRaMessage("RSP:NO_DATA");
+    bool wifiOffloaded = startWifiLocalOffload();
+    if (!wifiOffloaded) {
+      // Wi-Fi unavailable — fall back to LoRa streaming
+      bool sentData = streamStoredEventsOverLoRa();
+      if (!sentData) {
+        sendLoRaMessage("RSP:NO_DATA");
+      }
+      sendLoRaMessage("END:D");  // Only sent via LoRa when LoRa path was used
     }
-    sendLoRaMessage("END:D");
+    // When Wi-Fi path succeeded, END:D was already sent over TCP to the transmitter
     return;
   }
 
@@ -781,6 +1019,8 @@ void setup() {
   if (sdCard.begin()) {
     // Load truck identity for LoRa discovery responses
     loadTruckInfoFromSd();
+    // Load stored WiFi profiles for offload retries
+    loadWiFiProfilesFromSd();
     // Playback previous events
     playbackEvents();
   } else {

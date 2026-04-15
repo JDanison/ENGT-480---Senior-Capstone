@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <RadioLib.h>
+#include <WiFi.h>
 
 #define SERIAL_BAUD_RATE      115200
 
@@ -25,6 +26,10 @@ bool dataTransferActive = false;
 unsigned long dataTransferStartMs = 0;
 size_t dataTransferBytes = 0;
 size_t dataTransferLines = 0;
+
+#define MAX_WIFI_PROFILES 3
+String t_wifiSsids[MAX_WIFI_PROFILES];
+String t_wifiPasswords[MAX_WIFI_PROFILES];
 
 #if defined(ESP8266) || defined(ESP32)
   ICACHE_RAM_ATTR
@@ -67,6 +72,133 @@ bool sendLoRaCommand(char command) {
   return true;
 }
 
+void parseAndStoreWifiProfiles(const String& packet) {
+  if (!packet.startsWith("SETUP:")) return;
+  String data = packet.substring(6);
+  int start = 0;
+  while (start < (int)data.length()) {
+    int sep = data.indexOf(';', start);
+    if (sep < 0) sep = (int)data.length();
+    String token = data.substring(start, sep);
+    int eq = token.indexOf('=');
+    if (eq > 0) {
+      String key = token.substring(0, eq);
+      String value = token.substring(eq + 1);
+      key.trim(); value.trim();
+      // Key format: w0s, w0p, w1s, w1p, w2s, w2p
+      if (key.length() == 3 && key.charAt(0) == 'w' && isDigit(key.charAt(1))) {
+        int idx = key.charAt(1) - '0';
+        if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
+          if (key.charAt(2) == 's') t_wifiSsids[idx] = value;
+          else if (key.charAt(2) == 'p') t_wifiPasswords[idx] = value;
+        }
+      }
+    }
+    start = sep + 1;
+  }
+}
+
+bool connectTransmitterWiFi() {
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (t_wifiSsids[i].length() == 0) continue;
+    Serial.printf("[WIFI_TRY] %s\n", t_wifiSsids[i].c_str());
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(t_wifiSsids[i].c_str(), t_wifiPasswords[i].c_str());
+    int timeout = 8;
+    while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+      delay(1000);
+      timeout--;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[WIFI_CONNECTED] %s\n", t_wifiSsids[i].c_str());
+      return true;
+    }
+    Serial.printf("[WIFI_FAIL] %s\n", t_wifiSsids[i].c_str());
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+  return false;
+}
+
+void handleWifiServerMessage(const String& packet) {
+  // Packet format: RSP:WIFI_SERVER:<IP>:<PORT>
+  String payload = packet.substring(16);  // strip "RSP:WIFI_SERVER:"
+  int colonPos = payload.lastIndexOf(':');
+  if (colonPos < 0) {
+    Serial.println("[WIFI_SERVER] Malformed packet");
+    return;
+  }
+  String ip = payload.substring(0, colonPos);
+  int port = payload.substring(colonPos + 1).toInt();
+
+  if (!connectTransmitterWiFi()) {
+    Serial.println("[WIFI_TX_FAIL] No WiFi connection available");
+    return;
+  }
+
+  WiFiClient client;
+  bool tcpConnected = false;
+  for (int attempt = 0; attempt < 3 && !tcpConnected; attempt++) {
+    if (client.connect(ip.c_str(), port)) {
+      tcpConnected = true;
+    } else {
+      delay(2000);
+    }
+  }
+  if (!tcpConnected) {
+    Serial.println("[WIFI_TX_FAIL] TCP connect failed");
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return;
+  }
+
+  Serial.printf("[WIFI_TX_CONNECTED] %s:%d\n", ip.c_str(), port);
+  unsigned long startMs = millis();
+  dataTransferBytes = 0;
+  dataTransferLines = 0;
+
+  unsigned long lastActivity = millis();
+  while (client.connected() && (millis() - lastActivity) < 10000UL) {
+    if (!client.available()) continue;
+    String line = client.readStringUntil('\n');
+    line.replace("\r", "");
+    line.trim();
+    if (line.length() == 0) continue;
+    lastActivity = millis();
+
+    if (line.startsWith("DATA:")) {
+      String payload = line.substring(5);
+      dataTransferBytes += payload.length();
+      dataTransferLines++;
+      Serial.println(payload);
+    } else if (line.startsWith("DATC:")) {
+      String payload = line.substring(5);
+      dataTransferBytes += payload.length();
+      Serial.print(payload);
+    } else if (line == "END:D") {
+      client.stop();
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+      unsigned long elapsedMs = millis() - startMs;
+      float elapsedSec = elapsedMs / 1000.0f;
+      float rate = (elapsedSec > 0.0f) ? (dataTransferBytes / elapsedSec) : 0.0f;
+      Serial.println("END:D");
+      Serial.printf("[TRANSFER] duration=%lums lines=%u bytes=%u rate=%.1f B/s\n",
+                    elapsedMs, (unsigned int)dataTransferLines,
+                    (unsigned int)dataTransferBytes, rate);
+      return;
+    } else {
+      Serial.printf("[WIFI_RX] %s\n", line.c_str());
+    }
+  }
+
+  // Timeout or connection closed before END:D
+  client.stop();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  Serial.println("[WIFI_TX_TIMEOUT] Transfer ended without END:D");
+}
+
 void handleLoRaMessage(const String& packet) {
   if (packet.startsWith("SETUP:")) {
     Serial.printf("[SETUP_ACK] Setup echoed from receiver: %s\n", packet.c_str());
@@ -93,21 +225,25 @@ void handleLoRaMessage(const String& packet) {
   }
 
   if (packet.startsWith("END:")) {
-    Serial.printf("[%s]\n", packet.c_str());
-
     if (packet == "END:D" && dataTransferActive) {
       unsigned long elapsedMs = millis() - dataTransferStartMs;
       float elapsedSec = elapsedMs / 1000.0f;
       float bytesPerSec = (elapsedSec > 0.0f) ? (dataTransferBytes / elapsedSec) : 0.0f;
-
+      Serial.println("END:D");  // bare END:D so UI session_events counter fires
       Serial.printf("[TRANSFER] duration=%lums lines=%u bytes=%u rate=%.1f B/s\n",
                     elapsedMs,
                     (unsigned int)dataTransferLines,
                     (unsigned int)dataTransferBytes,
                     bytesPerSec);
-
       dataTransferActive = false;
+    } else {
+      Serial.printf("[%s]\n", packet.c_str());
     }
+    return;
+  }
+
+  if (packet.startsWith("RSP:WIFI_SERVER:")) {
+    handleWifiServerMessage(packet);
     return;
   }
 
@@ -164,6 +300,7 @@ void processSerialInput() {
   }
 
   if (line.startsWith("SETUP:")) {
+    parseAndStoreWifiProfiles(line);  // cache Wi-Fi profiles for TCP client step
     sendLoRaPacket(line);
     return;
   }
