@@ -1466,10 +1466,16 @@ class MainWindow:
                 if self.offload_wifi_start_time and self.offload_connected_time:
                     self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
                 self.offload_in_progress = False
-                self.offload_status = "Timeout"
                 saved_count = len(self._offload_saved_files)
-                save_note = f" — {saved_count} file(s) saved" if saved_count else ""
-                self.offload_last_status = f"Wi-Fi timeout ({total_dur:.1f}s){save_note}"
+                if saved_count > 0:
+                    self.offload_status = "Complete"
+                    self.offload_last_status = (
+                        f"Success without END:D ({total_dur:.1f}s, {self.offload_events_count} events)"
+                        f" — {saved_count} file(s) saved"
+                    )
+                else:
+                    self.offload_status = "Timeout"
+                    self.offload_last_status = f"Wi-Fi timeout ({total_dur:.1f}s)"
                 self._update_offload_status_display()
         # Wi-Fi connection failed
         elif "RSP:WIFI_FAIL:" in line or "[WIFI_FAIL]" in line:
