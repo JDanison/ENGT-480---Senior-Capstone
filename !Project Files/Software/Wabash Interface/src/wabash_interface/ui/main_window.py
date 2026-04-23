@@ -6,6 +6,7 @@ import json
 import time
 import datetime
 import subprocess
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -76,6 +77,7 @@ _APP_DIR: Path = Path(
     os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
 ) / "WabashInterface"
 _SETTINGS_FILE: Path = _APP_DIR / "settings.json"
+_KNOWN_TRUCKS_FILE: Path = _APP_DIR / "known_trucks.txt"
 
 
 def _default_data_path() -> Path:
@@ -102,8 +104,11 @@ class MainWindow:
         self.lora_active = False
         self.session_events = 0
         self.units: dict[str, dict] = {}
+        self.known_truck_ids: set[str] = set()
         self.detected_port_roles: dict[str, str] = {}
         self.connected_port = "-"
+        self._auto_connect_inflight = False
+        self._search_highlight_job: str | None = None
 
         # Offload statistics tracking
         self.offload_in_progress = False
@@ -128,6 +133,7 @@ class MainWindow:
         # Data storage path (defaults to AppData, overridden by saved settings)
         self.data_path_var = tk.StringVar(value=str(_default_data_path()))
         self._load_app_settings()
+        self._load_known_units()
 
         self.port_var     = tk.StringVar(value="")
         self.baud_var     = tk.StringVar(value="115200")
@@ -186,9 +192,11 @@ class MainWindow:
             self.root.iconbitmap(str(icon_path))
 
         self._build_ui()
+        self._refresh_unit_list()
         self._show_page("Dashboard")
         self._refresh_ports()
         self._pump_messages()
+        self.root.after(350, self._auto_connect_tick)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -439,27 +447,36 @@ class MainWindow:
         self.unit_filter_entry.grid(row=0, column=1, sticky="e")
         self.unit_filter_var.trace_add("write", lambda *_: self._refresh_unit_list())
 
-        thead = ctk.CTkFrame(fleet_card, fg_color=("#E5E7EB", "#1E3050"), corner_radius=8)
-        thead.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 4))
-        thead.grid_columnconfigure((0, 1, 2, 3), weight=1)
-        for col, lbl_text in enumerate(["Truck ID", "Last Seen", "Events", "Status"]):
-            ctk.CTkLabel(
-                thead, text=lbl_text,
-                font=ctk.CTkFont(size=11, weight="bold"),
-                text_color=("#475569", "#94A3B8"),
-            ).grid(row=0, column=col, sticky="w", padx=10, pady=6)
+        fleet_col_mins = (120, 98, 64, 76, 74)
+        fleet_col_weights = (4, 3, 2, 2, 2)
 
+        # Single-column scroll frame: row frames fill the full width  →  smooth backgrounds.
+        # Header frame and row frames share identical internal 5-column layout  →  perfect alignment.
         self.fleet_scroll = ctk.CTkScrollableFrame(fleet_card, corner_radius=8, fg_color="transparent")
-        self.fleet_scroll.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 14))
-        self.fleet_scroll.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self.fleet_scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 14))
+        self.fleet_scroll.grid_columnconfigure(0, weight=1)
+
+        self.fleet_thead = ctk.CTkFrame(self.fleet_scroll, fg_color=("#DCE5F5", "#22365A"), corner_radius=8)
+        self.fleet_thead.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        for col, (min_w, weight) in enumerate(zip(fleet_col_mins, fleet_col_weights)):
+            self.fleet_thead.grid_columnconfigure(col, minsize=min_w, weight=weight)
+        for col, lbl_text in enumerate(["Truck ID", "Last Seen", "Events", "Status", "Action"]):
+            _a = "e" if col == 4 else "w"
+            ctk.CTkLabel(
+                self.fleet_thead, text=lbl_text,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=("#334155", "#BFDBFE"),
+                anchor=_a,
+            ).grid(row=0, column=col, sticky="ew", padx=12, pady=8)
+
         self.fleet_empty_label = ctk.CTkLabel(
             self.fleet_scroll,
-            text="No units detected this session.\nConnect to a transmitter and offload data to populate this list.",
+            text="No units known yet.\nConnect and offload data to populate this list.",
             text_color=("#64748B", "#6B7280"),
             font=ctk.CTkFont(size=13),
             justify="center",
         )
-        self.fleet_empty_label.grid(row=0, column=0, columnspan=4, pady=30)
+        self.fleet_empty_label.grid(row=1, column=0, pady=30)
         self._fleet_rows: list = []
 
         # Active unit panel (right)
@@ -1006,6 +1023,15 @@ class MainWindow:
         if not self.search_var.get().strip():
             self._activate_search_placeholder()
 
+    def _schedule_search_highlight(self) -> None:
+        if self._search_highlight_job is not None:
+            self.root.after_cancel(self._search_highlight_job)
+        self._search_highlight_job = self.root.after(120, self._run_search_highlight)
+
+    def _run_search_highlight(self) -> None:
+        self._search_highlight_job = None
+        self._highlight_search()
+
     def _set_density(self, mode: str) -> None:
         px, py, fs, rp = DENSITY[mode]
         self.log_text.configure(font=("Consolas", fs))
@@ -1030,7 +1056,7 @@ class MainWindow:
             start = end
 
     def _on_search_change(self) -> None:
-        self._highlight_search()
+        self._schedule_search_highlight()
 
     def _clear_search(self) -> None:
         self.search_var.set("")
@@ -1053,17 +1079,19 @@ class MainWindow:
 
         self._update_port_selection_status()
 
-    def _connect(self) -> None:
+    def _connect(self, suppress_warnings: bool = False) -> bool:
         port = self.port_var.get().strip()
         if not port or port == "No ports found":
-            messagebox.showwarning("Port Required", "Select a COM port before connecting.")
-            return
+            if not suppress_warnings:
+                messagebox.showwarning("Port Required", "Select a COM port before connecting.")
+            return False
 
         try:
             baud = int(self.baud_var.get().strip())
         except ValueError:
-            messagebox.showerror("Invalid Baud", "Baud rate must be an integer.")
-            return
+            if not suppress_warnings:
+                messagebox.showerror("Invalid Baud", "Baud rate must be an integer.")
+            return False
 
         detected_role = self.detected_port_roles.get(port)
         if detected_role is None or detected_role == "unknown":
@@ -1073,16 +1101,20 @@ class MainWindow:
 
         if detected_role == "receiver":
             self._set_connected_state(False, "-", role="disconnected")
-            messagebox.showwarning("Receiver Detected", "The selected port appears to be a receiver. Connect to the transmitter instead.")
-            return
+            if not suppress_warnings:
+                messagebox.showwarning("Receiver Detected", "The selected port appears to be a receiver. Connect to the transmitter instead.")
+            return False
 
         try:
             self.serial_service.connect(SerialConfig(port=port, baudrate=baud))
             connection_role = detected_role if detected_role in {"transmitter", "unknown"} else "unknown"
             self._set_connected_state(True, port, role=connection_role)
+            return True
         except Exception as exc:
             self._set_connected_state(False, "-", role="disconnected")
-            messagebox.showerror("Connection Error", str(exc))
+            if not suppress_warnings:
+                messagebox.showerror("Connection Error", str(exc))
+            return False
 
     def _disconnect(self) -> None:
         self.serial_service.disconnect()
@@ -1169,7 +1201,7 @@ class MainWindow:
 
         # re-apply search highlight if active
         if self.search_var.get().strip():
-            self._highlight_search()
+            self._schedule_search_highlight()
 
         if tag == "tx":
             self.tx_count += 1
@@ -1201,8 +1233,6 @@ class MainWindow:
         if line.startswith("END:D"):
             self.session_events += 1
             self.db_event_count.configure(text=str(self.session_events))
-            if self.truck_id_var.get().strip():
-                self._register_unit(self.truck_id_var.get().strip())
 
         self.db_tx_count.configure(text=str(self.tx_count))
         self.db_rx_count.configure(text=str(self.rx_count))
@@ -1210,14 +1240,20 @@ class MainWindow:
         self.db_last_message.configure(text=self.last_message)
 
     def _pump_messages(self) -> None:
-        while not self.serial_service.messages.empty():
+        processed = 0
+        max_per_tick = 200
+        while processed < max_per_tick and not self.serial_service.messages.empty():
             line = self.serial_service.messages.get_nowait()
             self._append_log(line)
+            processed += 1
         self._update_active_unit_display()
         # Periodically refresh offload status display if active
         if self.offload_in_progress:
             self._update_offload_status_display()
-        self.root.after(100, self._pump_messages)
+        if not self.serial_service.messages.empty():
+            self.root.after(10, self._pump_messages)
+        else:
+            self.root.after(100, self._pump_messages)
 
     def _clear_log(self) -> None:
         self.log_lines.clear()
@@ -1686,6 +1722,10 @@ class MainWindow:
         if found_transmitter is not None:
             self.port_var.set(found_transmitter)
             self._append_log(f"[AUTO_DETECT] Transmitter detected on {found_transmitter}")
+            if self._connect(suppress_warnings=True):
+                self._append_log(f"[AUTO_DETECT] Auto-connected to {found_transmitter}")
+            else:
+                messagebox.showwarning("Auto Connect", f"Transmitter found on {found_transmitter}, but connection failed.")
             return
 
         if found_receiver is not None:
@@ -1696,6 +1736,43 @@ class MainWindow:
 
         self._append_log("[AUTO_DETECT] Unable to determine board type for detected ports.")
         messagebox.showwarning("Auto Detect", "Board(s) were found, but the role could not be verified from serial output.")
+
+    def _auto_connect_tick(self) -> None:
+        if self._is_transmitter_connected():
+            self.root.after(3000, self._auto_connect_tick)
+            return
+
+        if self._auto_connect_inflight:
+            self.root.after(1200, self._auto_connect_tick)
+            return
+
+        self._auto_connect_inflight = True
+        worker = threading.Thread(target=self._scan_and_connect_transmitter_worker, daemon=True)
+        worker.start()
+
+    def _scan_and_connect_transmitter_worker(self) -> None:
+        found_port: str | None = None
+        try:
+            ports = [port.device for port in list_ports.comports()]
+            for port in ports:
+                role = self._probe_port_role(port)
+                self.detected_port_roles[port] = role
+                if role == "transmitter":
+                    found_port = port
+                    break
+        finally:
+            self.root.after(0, lambda p=found_port: self._complete_auto_connect_scan(p))
+
+    def _complete_auto_connect_scan(self, found_port: str | None) -> None:
+        try:
+            self._refresh_ports()
+            if found_port is not None and not self._is_transmitter_connected():
+                self.port_var.set(found_port)
+                if self._connect(suppress_warnings=True):
+                    self._append_log(f"[AUTO_CONNECT] Connected to transmitter on {found_port}")
+        finally:
+            self._auto_connect_inflight = False
+            self.root.after(3000, self._auto_connect_tick)
 
     def _build_unit_setup_page(self) -> None:
         page = ctk.CTkScrollableFrame(
@@ -2121,10 +2198,62 @@ class MainWindow:
             self.db_unit_id.configure(text="No unit configured", text_color=("#64748B", "#9CA3AF"))
             self.db_unit_desc.configure(text="")
 
+    def _load_known_units(self) -> None:
+        self.known_truck_ids.clear()
+        # File format: "truck_id|YYYY-MM-DD HH:MM" per line (legacy: bare truck_id)
+        last_seen_map: dict[str, str] = {}
+        try:
+            _APP_DIR.mkdir(parents=True, exist_ok=True)
+            if _KNOWN_TRUCKS_FILE.exists():
+                for raw_line in _KNOWN_TRUCKS_FILE.read_text(encoding="utf-8").splitlines():
+                    parts = raw_line.strip().split("|", 1)
+                    truck_id = parts[0].strip()
+                    if truck_id:
+                        self.known_truck_ids.add(truck_id)
+                        last_seen_map[truck_id] = parts[1].strip() if len(parts) == 2 else "-"
+        except Exception:
+            self.known_truck_ids.clear()
+
+        for truck_id in sorted(self.known_truck_ids):
+            if truck_id not in self.units:
+                self.units[truck_id] = {
+                    "truck_id": truck_id,
+                    "last_seen": last_seen_map.get(truck_id, "-"),
+                    "events": 0,
+                    "status": "Known",
+                }
+
+    def _save_known_units(self) -> None:
+        try:
+            _APP_DIR.mkdir(parents=True, exist_ok=True)
+            lines = []
+            for truck_id in sorted(self.known_truck_ids):
+                last_seen = self.units.get(truck_id, {}).get("last_seen", "-")
+                lines.append(f"{truck_id}|{last_seen}")
+            _KNOWN_TRUCKS_FILE.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _delete_known_unit(self, truck_id: str) -> None:
+        if not messagebox.askyesno(
+            "Delete Known Unit",
+            f"Delete truck ID '{truck_id}' from known units?",
+        ):
+            return
+
+        self.known_truck_ids.discard(truck_id)
+        self._save_known_units()
+        if truck_id in self.units:
+            del self.units[truck_id]
+        self._refresh_unit_list()
+
     def _register_unit(self, truck_id: str) -> None:
         """Add or update a unit in the fleet registry and refresh the table."""
         import datetime
-        now = datetime.datetime.now().strftime("%H:%M:%S")
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        self.known_truck_ids.add(truck_id)
+
         if truck_id in self.units:
             self.units[truck_id]["last_seen"] = now
             self.units[truck_id]["events"] += 1
@@ -2136,6 +2265,7 @@ class MainWindow:
                 "events": 1,
                 "status": "Active",
             }
+        self._save_known_units()
         self._refresh_unit_list()
 
     def _refresh_unit_list(self) -> None:
@@ -2145,26 +2275,66 @@ class MainWindow:
                 w.destroy()
         self._fleet_rows.clear()
 
+        for truck_id in self.known_truck_ids:
+            if truck_id not in self.units:
+                self.units[truck_id] = {
+                    "truck_id": truck_id,
+                    "last_seen": "-",
+                    "events": 0,
+                    "status": "Known",
+                }
+
         term = self.unit_filter_var.get().strip().lower()
         units = [u for u in self.units.values() if not term or term in u["truck_id"].lower()]
+        units.sort(key=lambda u: (u["status"] != "Active", u["truck_id"]))
 
         if not units:
-            self.fleet_empty_label.grid(row=0, column=0, columnspan=4, pady=30)
+            self.fleet_empty_label.grid(row=1, column=0, columnspan=5, pady=30)
             return
 
         self.fleet_empty_label.grid_remove()
+        fleet_col_mins = (120, 98, 64, 76, 74)
+        fleet_col_weights = (4, 3, 2, 2, 2)
+        row_colors = (("#EAF1FB", "#152946"), ("#DEE9F8", "#1A3153"))
+
         for i, unit in enumerate(units):
-            cols: list[ctk.CTkLabel] = []
+            row_widgets: list[ctk.CTkBaseClass] = []
+            # Row frame placed in single scroll column → fills full width → smooth background.
+            row_frame = ctk.CTkFrame(
+                self.fleet_scroll,
+                corner_radius=6,
+                fg_color=row_colors[i % 2],
+            )
+            row_frame.grid(row=i + 2, column=0, sticky="ew", pady=2)
+            # Same column layout as fleet_thead → columns align perfectly.
+            for col, (min_w, weight) in enumerate(zip(fleet_col_mins, fleet_col_weights)):
+                row_frame.grid_columnconfigure(col, minsize=min_w, weight=weight)
+            row_widgets.append(row_frame)
+
             for col, text in enumerate([unit["truck_id"], unit["last_seen"], str(unit["events"]), unit["status"]]):
                 lbl = ctk.CTkLabel(
-                    self.fleet_scroll, text=text,
+                    row_frame, text=text,
                     font=ctk.CTkFont(size=12),
                     text_color=("#1E293B", "#E2E8F0"),
                     anchor="w",
                 )
-                lbl.grid(row=i, column=col, sticky="ew", padx=10, pady=4)
-                cols.append(lbl)
-            self._fleet_rows.append(cols)
+                lbl.grid(row=0, column=col, sticky="ew", padx=12, pady=8)
+                row_widgets.append(lbl)
+
+            del_btn = ctk.CTkButton(
+                row_frame,
+                text="Delete",
+                width=68,
+                height=26,
+                fg_color="#B91C1C",
+                hover_color="#991B1B",
+                text_color="#FEE2E2",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda tid=unit["truck_id"]: self._delete_known_unit(tid),
+            )
+            del_btn.grid(row=0, column=4, sticky="e", padx=(0, 8), pady=6)
+            row_widgets.append(del_btn)
+            self._fleet_rows.append(row_widgets)
 
     def _run_connection_scan(self) -> None:
         if not self._is_transmitter_connected():
