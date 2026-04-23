@@ -114,6 +114,8 @@ class MainWindow:
         self._resize_job: str | None = None
         self._resizing: bool = False
         self._last_size: tuple[int, int] = (0, 0)
+        self._next_offload_ui_update: float = 0.0
+        self._window_interacting_until: float = 0.0
 
         # Offload statistics tracking
         self.offload_in_progress = False
@@ -1197,25 +1199,34 @@ class MainWindow:
             return "status"
         return "rx"
 
-    def _append_log(self, line: str) -> None:
+    def _refresh_log_widgets(self) -> None:
+        """Refresh log-related widgets after one or more new lines were appended."""
+        self.log_text.see("end")
+
+        # Re-apply search highlight if active (debounced).
+        if self.search_var.get().strip():
+            self._schedule_search_highlight()
+
+        self.tx_stat.configure(text=str(self.tx_count))
+        self.rx_stat.configure(text=str(self.rx_count))
+        self.db_tx_count.configure(text=str(self.tx_count))
+        self.db_rx_count.configure(text=str(self.rx_count))
+        self.db_log_count.configure(text=str(len(self.log_lines)))
+        self.db_event_count.configure(text=str(self.session_events))
+        self.db_last_message.configure(text=self.last_message)
+
+    def _append_log(self, line: str, defer_ui: bool = False) -> None:
         self.log_lines.append(line)
         self.last_message = line
         tag = self._classify_line(line)
 
         inner: tk.Text = self.log_text._textbox  # type: ignore[attr-defined]
         inner.insert("end", line + "\n", tag)
-        self.log_text.see("end")
-
-        # re-apply search highlight if active
-        if self.search_var.get().strip():
-            self._schedule_search_highlight()
 
         if tag == "tx":
             self.tx_count += 1
-            self.tx_stat.configure(text=str(self.tx_count))
         else:
             self.rx_count += 1
-            self.rx_stat.configure(text=str(self.rx_count))
             detected_role = self._role_from_banner(line)
             if detected_role is not None and self.connected_port != "-":
                 self.detected_port_roles[self.connected_port] = detected_role
@@ -1239,24 +1250,31 @@ class MainWindow:
         # Each END:D marks a completed data offload from the receiver
         if line.startswith("END:D"):
             self.session_events += 1
-            self.db_event_count.configure(text=str(self.session_events))
 
-        self.db_tx_count.configure(text=str(self.tx_count))
-        self.db_rx_count.configure(text=str(self.rx_count))
-        self.db_log_count.configure(text=str(len(self.log_lines)))
-        self.db_last_message.configure(text=self.last_message)
+        if not defer_ui:
+            self._refresh_log_widgets()
 
     def _pump_messages(self) -> None:
+        # While the top-level window is moving/resizing, defer heavy text/widget work.
+        if time.time() < self._window_interacting_until:
+            self.root.after(120, self._pump_messages)
+            return
+
         processed = 0
         max_per_tick = 200
         while processed < max_per_tick and not self.serial_service.messages.empty():
             line = self.serial_service.messages.get_nowait()
-            self._append_log(line)
+            self._append_log(line, defer_ui=True)
             processed += 1
-        self._update_active_unit_display()
+        if processed:
+            self._refresh_log_widgets()
+            self._update_active_unit_display()
         # Periodically refresh offload status display if active
         if self.offload_in_progress:
-            self._update_offload_status_display()
+            now = time.time()
+            if now >= self._next_offload_ui_update:
+                self._update_offload_status_display()
+                self._next_offload_ui_update = now + 0.25
         if not self.serial_service.messages.empty():
             self.root.after(10, self._pump_messages)
         else:
@@ -2422,6 +2440,7 @@ class MainWindow:
         """Debounce root window resize: freeze updates during drag, flush once settled."""
         if getattr(event, "widget", None) is not self.root:
             return
+        self._window_interacting_until = time.time() + 0.12
         current_size = (event.width, event.height)
         if current_size == self._last_size:
             return  # only position changed (window drag), skip entirely
