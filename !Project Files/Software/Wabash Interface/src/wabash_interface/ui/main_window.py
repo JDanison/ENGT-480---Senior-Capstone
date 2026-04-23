@@ -93,6 +93,7 @@ class MainWindow:
         self.root.title("Wabash Interface")
         self.root.geometry("1240x780")
         self.root.minsize(1024, 680)
+        self.root.after(0, lambda: self.root.state("zoomed"))
 
         self.serial_service = SerialService()
         self.log_lines: list[str] = []
@@ -109,6 +110,10 @@ class MainWindow:
         self.connected_port = "-"
         self._auto_connect_inflight = False
         self._search_highlight_job: str | None = None
+        self._wrap_job: str | None = None
+        self._resize_job: str | None = None
+        self._resizing: bool = False
+        self._last_size: tuple[int, int] = (0, 0)
 
         # Offload statistics tracking
         self.offload_in_progress = False
@@ -199,6 +204,8 @@ class MainWindow:
         self.root.after(350, self._auto_connect_tick)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Suppress per-pixel geometry recalculations while the window is being dragged.
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
 
     def run(self) -> None:
         self.root.mainloop()
@@ -1784,7 +1791,7 @@ class MainWindow:
         )
         page.grid_columnconfigure(0, weight=1)
         self.pages["Unit Setup"] = page
-        page.bind("<Configure>", lambda _e: self._update_unit_setup_wrap(), add="+")
+        page.bind("<Configure>", lambda _e: self._schedule_unit_setup_wrap(), add="+")
 
         header = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -1904,7 +1911,7 @@ class MainWindow:
         desc_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         desc_card.grid(row=5, column=0, sticky="ew", pady=(0, 12))
         desc_card.grid_columnconfigure(0, weight=1)
-        desc_card.bind("<Configure>", lambda _e: self._update_unit_setup_wrap(), add="+")
+        desc_card.bind("<Configure>", lambda _e: self._schedule_unit_setup_wrap(), add="+")
         self.unit_setup_desc_card = desc_card
         self.unit_setup_help_label = ctk.CTkLabel(
             desc_card,
@@ -1982,6 +1989,18 @@ class MainWindow:
         self.send_config_button.grid(row=6, column=0, sticky="ew")
         self._update_send_config_button()
         self.root.after(0, self._update_unit_setup_wrap)
+
+    def _schedule_unit_setup_wrap(self) -> None:
+        """Debounce wraplength recalculation so it only runs once after resize settles."""
+        if self._resizing:
+            return
+        if hasattr(self, "_wrap_job") and self._wrap_job is not None:
+            self.root.after_cancel(self._wrap_job)
+        self._wrap_job = self.root.after(120, self._run_unit_setup_wrap)
+
+    def _run_unit_setup_wrap(self) -> None:
+        self._wrap_job = None
+        self._update_unit_setup_wrap()
 
     def _update_unit_setup_wrap(self) -> None:
         if self.unit_setup_help_label is None:
@@ -2398,4 +2417,22 @@ class MainWindow:
     def _on_close(self) -> None:
         self.serial_service.disconnect()
         self.root.destroy()
+
+    def _on_root_configure(self, event: object) -> None:
+        """Debounce root window resize: freeze updates during drag, flush once settled."""
+        if getattr(event, "widget", None) is not self.root:
+            return
+        current_size = (event.width, event.height)
+        if current_size == self._last_size:
+            return  # only position changed (window drag), skip entirely
+        self._last_size = current_size
+        self._resizing = True
+        if self._resize_job is not None:
+            self.root.after_cancel(self._resize_job)
+        self._resize_job = self.root.after(80, self._on_resize_settled)
+
+    def _on_resize_settled(self) -> None:
+        self._resize_job = None
+        self._resizing = False
+        self._update_unit_setup_wrap()
 
