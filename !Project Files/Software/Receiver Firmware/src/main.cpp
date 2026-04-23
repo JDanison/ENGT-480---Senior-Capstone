@@ -34,6 +34,13 @@ unsigned long EVENT_CAPTURE_DURATION_MS = 2000; // Default: 2000ms
 unsigned int LAB_TEST_SAMPLE_RATE_HZ = 20;      // Default: 20Hz
 // ===========================================
 
+// Strain calibration: convert computed microstrain to calibrated extensometer-equivalent microstrain.
+constexpr float STRAIN_CALIBRATION_DIVISOR = 11679.7f;
+
+static inline float toCalibratedMicrostrain(float strainDecimal) {
+  return (strainDecimal * 1000000.0f) / STRAIN_CALIBRATION_DIVISOR;
+}
+
 // ===== TRUCK IDENTITY (set via SETUP packet or loaded from SD) =====
 String g_truckId = "";
 bool g_includeTruckId = false;
@@ -975,7 +982,8 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
   eventSamples[0].z = triggerZ;
   int32_t triggerStrainRaw = nau7802.readRaw();
   int32_t triggerStrainZeroed = triggerStrainRaw - nau7802.getZeroOffset();
-  eventSamples[0].strainMicro = nau7802.calculateStrain(triggerStrainZeroed, 3.3, 2.0) * 1000000.0;
+  eventSamples[0].strainMicro = toCalibratedMicrostrain(
+      nau7802.calculateStrain(triggerStrainZeroed, 3.3, 2.0));
   
   Serial.printf("\n!!! EVENT TRIGGERED !!! Capturing for %d ms...", EVENT_CAPTURE_DURATION_MS);
   
@@ -996,7 +1004,8 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
 
     int32_t strainRaw = nau7802.readRaw();
     int32_t strainZeroed = strainRaw - nau7802.getZeroOffset();
-    eventSamples[i].strainMicro = nau7802.calculateStrain(strainZeroed, 3.3, 2.0) * 1000000.0;
+    eventSamples[i].strainMicro = toCalibratedMicrostrain(
+      nau7802.calculateStrain(strainZeroed, 3.3, 2.0));
 
     sampleCount++;
     Serial.print(".");
@@ -1235,7 +1244,7 @@ void processSerialCommand(char command) {
         
         // Example strain calculation (assuming 3.3V excitation and GF=2.0)
         float strain = nau7802.calculateStrain(filtered - raw + reading, 3.3, 2.0);
-        float microstrain = strain * 1000000.0; // Convert to microstrain
+        float microstrain = toCalibratedMicrostrain(strain); // Convert to calibrated microstrain
         Serial.printf("\nEstimated Strain: %.2f με (microstrain)\n", microstrain);
         
         // Interpret the strain value
@@ -1341,7 +1350,7 @@ void processSerialCommand(char command) {
           int32_t filtered = nau7802.readFiltered(20); // Outlier rejection
           int32_t zeroed = filtered - nau7802.getZeroOffset(); // Apply tare offset
           float strain = nau7802.calculateStrain(zeroed, 3.3, 2.0);
-          float microstrain = strain * 1000000.0;
+          float microstrain = toCalibratedMicrostrain(strain);
           
           float elapsedTime = (millis() - startTime) / 1000.0;
           unsigned long sampleMs = millis() - sampleStart;
@@ -1480,7 +1489,7 @@ void processSerialCommand(char command) {
           int32_t raw = nau7802.readRaw();
           int32_t zeroed = raw - nau7802.getZeroOffset();
           float strain = nau7802.calculateStrain(zeroed, 3.3, 2.0);
-          float microstrain = strain * 1000000.0;
+          float microstrain = toCalibratedMicrostrain(strain);
           float elapsedTime = (millis() - startTime) / 1000.0;
           
           // Store in memory
