@@ -67,17 +67,29 @@ class SerialService:
         self.send_text(command)
 
     def _read_loop(self) -> None:
+        pending = bytearray()
         while not self._stop_event.is_set():
             if self._serial is None or not self._serial.is_open:
                 break
 
-            raw = self._serial.readline()
+            waiting = self._serial.in_waiting if self._serial is not None else 0
+            raw = self._serial.read(waiting or 1)
             if not raw:
                 continue
 
-            message = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-            if message:
-                self.messages.put(message)
+            pending.extend(raw)
+
+            while True:
+                newline_index = pending.find(b"\n")
+                if newline_index < 0:
+                    break
+
+                line = pending[:newline_index]
+                del pending[: newline_index + 1]
+
+                message = line.decode("utf-8", errors="replace").rstrip("\r")
+                if message:
+                    self.messages.put(message)
 
     def _emit_status(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
