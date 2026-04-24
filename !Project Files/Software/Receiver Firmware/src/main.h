@@ -30,6 +30,7 @@
 #include "LIS3DH_Module.h"
 #include "SDCard_Module.h"
 #include "NAU7802_Module.h"
+#include "EventLogger_Module.h"
 
 
 /**
@@ -52,17 +53,35 @@
 #define SDCARD_SCK          35      // SD card SCK pin (White wire)
 #define SDCARD_CS           36      // SD card CS pin (Yellow wire)
 
+// LoRa (SX1262) Pin Definitions for Heltec WiFi LoRa 32 V3
+#define LORA_NSS            8
+#define LORA_DIO1           14
+#define LORA_RST            12
+#define LORA_BUSY           13
+
+// LoRa Radio Link Configuration
+#define LORA_FREQUENCY_MHZ  915.0
+#define LORA_BANDWIDTH_KHZ  125.0
+#define LORA_SPREADING_FACTOR 9
+#define LORA_CODING_RATE    7
+#define LORA_SYNC_WORD      0x34
+#define LORA_TX_POWER_DBM   14
+#define LORA_PREAMBLE_LEN   8
+#define LORA_DATA_CHUNK_SIZE 180
+
 // Serial Configuration
 #define SERIAL_BAUD_RATE    115200  // Serial monitor baud rate
 
-// Timing Configuration
-#define SENSOR_READ_INTERVAL 100    // Sensor reading interval in milliseconds (fast for demo)
-#define ACCEL_THRESHOLD      2.0    // Accelerometer threshold in g's
-#define EVENT_CAPTURE_DURATION_MS 2000 // Event capture window in milliseconds
-#define EVENT_MAX_SAMPLES      80      // Safety cap for paired accel+strain samples in one event
+// ===== CONFIGURABLE RUNTIME PARAMETERS (can be updated via CFG packets) =====
+// These are declared as extern globals and defined in main.cpp
+extern unsigned long SENSOR_READ_INTERVAL;      // Sensor reading interval in milliseconds
+extern float ACCEL_THRESHOLD;                   // Accelerometer threshold in g's
+extern unsigned long EVENT_CAPTURE_DURATION_MS; // Event capture window in milliseconds
+extern unsigned int LAB_TEST_SAMPLE_RATE_HZ;    // Lab test sampling rate (10 or 20 Hz)
+// ======================================================================
 
-// Lab Test Configuration
-#define LAB_TEST_SAMPLE_RATE_HZ  20  // Lab test sampling rate (10 or 20 Hz)
+// Timing Configuration (non-configurable)
+#define EVENT_MAX_SAMPLES      80      // Safety cap for paired accel+strain samples in one event
 
 // WiFi Configuration (for time sync)
 // NOTE: Update these with your WiFi credentials before deploying
@@ -73,6 +92,13 @@
 #define NTP_SERVER              "pool.ntp.org"          // NTP server for time sync
 #define GMT_OFFSET_SEC          -18000                  // EST = GMT-5 (5 hours * 3600 seconds)
 #define DAYLIGHT_OFFSET_SEC     3600                    // Daylight saving time offset (1 hour)
+
+// WiFi peer-to-peer offload profile storage
+#define MAX_WIFI_PROFILES        3
+#define WIFI_PROFILE_FILE        "/wifi/profiles.txt"
+#define WIFI_CONNECT_TIMEOUT_SEC 8
+#define WIFI_SERVER_PORT         8080
+#define WIFI_CLIENT_TIMEOUT_SEC  35   // Seconds receiver waits for transmitter TCP connection
 
 
 /**
@@ -96,11 +122,20 @@ void loop();
 // Event capture functions
 void captureEvent(float triggerX, float triggerY, float triggerZ);
 void playbackEvents();
+void deleteAllEventFiles();
 
 // Time sync functions
 bool syncTime();
 String getFormattedTime();
 void offloadData();
+bool startWifiLocalOffload();
+void loadWiFiProfilesFromSd();
+bool saveWiFiProfilesToSd();
+
+// Configuration functions
+bool parseSetupPacket(const String& packet);
+bool saveTruckInfoToSd(const String& truckId, const String& description, bool includeTruckId, bool includeDescription);
+void applyConfiguration();
 
 // Legacy function prototypes (to be implemented)
 void decToHex(int decimal, char * hex);   // Conversion from Decimal to Hex

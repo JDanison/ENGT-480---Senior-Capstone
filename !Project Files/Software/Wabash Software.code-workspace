@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "Wabash Interface"
+		},
+		{
+			"path": "Receiver Firmware"
+		},
+		{
+			"path": "Transmitter Firmware"
+		}
+	],
+	"settings": {}
+}

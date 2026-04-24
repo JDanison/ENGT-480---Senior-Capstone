@@ -22,6 +22,680 @@ NAU7802_Module nau7802(&I2C_Sensors, NAU7802_I2C_ADDRESS);  // NAU7802 ADC for s
 // SD Card - Initialize SPI on HSPI bus
 SPIClass spiSD(HSPI);
 SDCard_Module sdCard(&spiSD, SDCARD_CS);
+EventLogger_Module eventLogger(&sdCard);
+SX1262 loraRadio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
+
+volatile bool loraPacketReceived = false;
+
+// ===== CONFIGURABLE RUNTIME PARAMETERS =====
+unsigned long SENSOR_READ_INTERVAL = 100;       // Default: 100ms
+float ACCEL_THRESHOLD = 2.0;                    // Default: 2.0g
+unsigned long EVENT_CAPTURE_DURATION_MS = 2000; // Default: 2000ms
+unsigned int LAB_TEST_SAMPLE_RATE_HZ = 20;      // Default: 20Hz
+// ===========================================
+
+// Strain calibration: convert computed microstrain to calibrated extensometer-equivalent microstrain.
+constexpr float STRAIN_CALIBRATION_DIVISOR = 11679.7f;
+
+static inline float toCalibratedMicrostrain(float strainDecimal) {
+  return (strainDecimal * 1000000.0f) / STRAIN_CALIBRATION_DIVISOR;
+}
+
+// ===== TRUCK IDENTITY (set via SETUP packet or loaded from SD) =====
+String g_truckId = "";
+bool g_includeTruckId = false;
+String g_description = "";
+bool g_includeDescription = false;
+// ===================================================================
+
+// ===== WiFi Offload Profiles (set via SETUP packet or loaded from SD) =====
+String g_wifiSsids[MAX_WIFI_PROFILES];
+String g_wifiPasswords[MAX_WIFI_PROFILES];
+// ===========================================================================
+
+constexpr uint8_t SETUP_MASK_SENSOR_INTERVAL = 1 << 0;
+constexpr uint8_t SETUP_MASK_THRESHOLD = 1 << 1;
+constexpr uint8_t SETUP_MASK_SAMPLE_RATE = 1 << 2;
+constexpr uint8_t SETUP_MASK_DURATION = 1 << 3;
+constexpr uint8_t SETUP_MASK_TRUCK_ID = 1 << 4;
+constexpr uint8_t SETUP_MASK_DESCRIPTION = 1 << 5;
+constexpr uint8_t SETUP_MASK_WIFI = 1 << 6;
+constexpr uint8_t SETUP_MASK_LEGACY_DEFAULT = SETUP_MASK_SENSOR_INTERVAL |
+                                              SETUP_MASK_THRESHOLD |
+                                              SETUP_MASK_SAMPLE_RATE |
+                                              SETUP_MASK_DURATION |
+                                              SETUP_MASK_WIFI;
+
+void processSerialCommand(char command);
+bool setTimeManually(const char* dateTimeStr);
+void deleteAllEventFiles();
+
+#if defined(ESP8266) || defined(ESP32)
+  ICACHE_RAM_ATTR
+#endif
+void setLoRaFlag(void) {
+  loraPacketReceived = true;
+}
+
+bool sendLoRaMessage(const String& payload) {
+  int txState = loraRadio.transmit(payload.c_str());
+  if (txState != RADIOLIB_ERR_NONE) {
+    Serial.printf("LoRa TX failed (%d)\n", txState);
+    return false;
+  }
+  return true;
+}
+
+void restartLoRaReceive() {
+  int rxState = loraRadio.startReceive();
+  if (rxState != RADIOLIB_ERR_NONE) {
+    Serial.printf("LoRa RX start failed (%d)\n", rxState);
+  }
+}
+
+void sendCsvLineOverLoRa(const String& line) {
+  if (line.length() <= LORA_DATA_CHUNK_SIZE) {
+    sendLoRaMessage("DATA:" + line);
+    return;
+  }
+
+  int index = 0;
+  while (index < line.length()) {
+    int remaining = line.length() - index;
+    int take = remaining > LORA_DATA_CHUNK_SIZE ? LORA_DATA_CHUNK_SIZE : remaining;
+    String chunk = line.substring(index, index + take);
+    bool isFinalChunk = (index + take) >= line.length();
+
+    if (isFinalChunk) {
+      sendLoRaMessage("DATA:" + chunk);
+    } else {
+      sendLoRaMessage("DATC:" + chunk);
+    }
+
+    index += take;
+    delay(10);
+  }
+}
+
+bool streamStoredEventsOverLoRa() {
+  if (!sdCard.isInitialized() || !sdCard.fileExists("/events")) {
+    return false;
+  }
+
+  File root = SD.open("/events");
+  if (!root || !root.isDirectory()) {
+    return false;
+  }
+
+  bool sentAnyLine = false;
+  File file = root.openNextFile();
+  while (file) {
+    if (!file.isDirectory()) {
+      String filename = String(file.name());
+      String baseName = filename;
+      int slashIdx = baseName.lastIndexOf('/');
+      if (slashIdx >= 0 && slashIdx < (baseName.length() - 1)) {
+        baseName = baseName.substring(slashIdx + 1);
+      }
+
+      if (baseName.startsWith("event ") && baseName.endsWith(".csv")) {
+        // Emit file boundary marker so the UI can save each event as its own file
+        sendLoRaMessage("DATA:EVENT_FILE:" + baseName);
+        delay(10);
+        while (file.available()) {
+          String line = file.readStringUntil('\n');
+          line.replace("\r", "");
+          line.trim();
+          if (line.length() == 0 || line.startsWith("timestamp,")) {
+            continue;
+          }
+
+          sendCsvLineOverLoRa(line);
+          sentAnyLine = true;
+          delay(15);
+        }
+      }
+      file.close();
+    } else {
+      file.close();
+    }
+    file = root.openNextFile();
+  }
+
+  root.close();
+  return sentAnyLine;
+}
+
+bool saveTruckInfoToSd(const String& truckId, const String& description, bool includeTruckId, bool includeDescription) {
+  if (!sdCard.isInitialized()) {
+    Serial.println("Truck info not saved: SD card not initialized.");
+    return false;
+  }
+
+  String content = "# Truck Info\n";
+  content += "updated=" + getFormattedTime() + "\n";
+  content += "include_truck_id=" + String(includeTruckId ? "1" : "0") + "\n";
+  content += "include_description=" + String(includeDescription ? "1" : "0") + "\n";
+  content += "truck_id=" + String(includeTruckId ? truckId : "") + "\n";
+  content += "description=" + String(includeDescription ? description : "") + "\n";
+
+  bool ok = sdCard.writeFile("/truck info/truck_id.txt", content.c_str(), false);
+  if (ok) {
+    Serial.println("Truck info saved: /truck info/truck_id.txt");
+  } else {
+    Serial.println("Truck info save failed.");
+  }
+  return ok;
+}
+
+bool saveWiFiProfilesToSd() {
+  if (!sdCard.isInitialized()) {
+    Serial.println("WiFi profiles not saved: SD card not initialized.");
+    return false;
+  }
+
+  String content = "# WiFi Profiles\n";
+  content += "updated=" + getFormattedTime() + "\n";
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    content += "w" + String(i) + "_ssid=" + g_wifiSsids[i] + "\n";
+    content += "w" + String(i) + "_pass=" + g_wifiPasswords[i] + "\n";
+  }
+
+  bool ok = sdCard.writeFile(WIFI_PROFILE_FILE, content.c_str(), false);
+  if (ok) {
+    Serial.printf("WiFi profiles saved: %s\n", WIFI_PROFILE_FILE);
+  } else {
+    Serial.println("WiFi profile save failed.");
+  }
+  return ok;
+}
+
+bool parseSetupPacket(const String& packet) {
+  if (!packet.startsWith("SETUP:")) {
+    return false;
+  }
+
+  String data = packet.substring(6);
+  data.trim();
+
+  unsigned long nextInterval = SENSOR_READ_INTERVAL;
+  float nextThreshold = ACCEL_THRESHOLD;
+  unsigned int nextSampleRate = LAB_TEST_SAMPLE_RATE_HZ;
+  unsigned long nextDuration = EVENT_CAPTURE_DURATION_MS;
+  bool sawInterval = false;
+  bool sawThreshold = false;
+  bool sawSampleRate = false;
+  bool sawDuration = false;
+  bool includeTruckId = g_includeTruckId;
+  bool includeDescription = g_includeDescription;
+  String truckId = g_truckId;
+  String description = g_description;
+  String nextSsids[MAX_WIFI_PROFILES];
+  String nextPasswords[MAX_WIFI_PROFILES];
+  uint8_t setupMask = SETUP_MASK_LEGACY_DEFAULT;
+  bool maskProvided = false;
+
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    nextSsids[i] = g_wifiSsids[i];
+    nextPasswords[i] = g_wifiPasswords[i];
+  }
+
+  int start = 0;
+  while (start < data.length()) {
+    int sep = data.indexOf(';', start);
+    if (sep < 0) {
+      sep = data.length();
+    }
+
+    String token = data.substring(start, sep);
+    int eq = token.indexOf('=');
+    if (eq > 0) {
+      String key = token.substring(0, eq);
+      String value = token.substring(eq + 1);
+      key.trim();
+      value.trim();
+
+      if (key == "si") {
+        nextInterval = value.toInt();
+        sawInterval = true;
+      } else if (key == "m") {
+        unsigned long v = value.toInt();
+        if (v > 127) {
+          Serial.println("ERROR: Setup mask out of range (0-127)");
+          return false;
+        }
+        setupMask = (uint8_t)v;
+        maskProvided = true;
+      } else if (key == "thr") {
+        nextThreshold = value.toFloat();
+        sawThreshold = true;
+      } else if (key == "sr") {
+        nextSampleRate = (unsigned int)value.toInt();
+        sawSampleRate = true;
+      } else if (key == "dur") {
+        nextDuration = value.toInt();
+        sawDuration = true;
+      } else if (key == "ti") {
+        includeTruckId = (value == "1");
+      } else if (key == "tid") {
+        truckId = value;
+      } else if (key == "di") {
+        includeDescription = (value == "1");
+      } else if (key == "desc") {
+        description = value;
+      } else if (key.length() == 3 && key.charAt(0) == 'w' && isDigit(key.charAt(1))) {
+        int idx = key.charAt(1) - '0';
+        if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
+          if (key.charAt(2) == 's') {
+            nextSsids[idx] = value;
+          } else if (key.charAt(2) == 'p') {
+            nextPasswords[idx] = value;
+          }
+        }
+      }
+    }
+
+    start = sep + 1;
+  }
+
+  // Validate only fields that are explicitly selected by setup mask.
+  if ((setupMask & SETUP_MASK_SENSOR_INTERVAL) && sawInterval) {
+    if (nextInterval < 1 || nextInterval > 10000) {
+      Serial.println("ERROR: Sensor interval out of range (1-10000 ms)");
+      return false;
+    }
+  }
+  if ((setupMask & SETUP_MASK_THRESHOLD) && sawThreshold) {
+    if (nextThreshold <= 0.0f || nextThreshold > 10.0f) {
+      Serial.println("ERROR: Event trigger threshold out of range (0-10 g]");
+      return false;
+    }
+  }
+  if ((setupMask & SETUP_MASK_SAMPLE_RATE) && sawSampleRate) {
+    if (nextSampleRate != 10 && nextSampleRate != 20) {
+      Serial.println("ERROR: Sample rate must be 10 or 20 Hz");
+      return false;
+    }
+  }
+  if ((setupMask & SETUP_MASK_DURATION) && sawDuration) {
+    if (nextDuration < 1 || nextDuration > 10000) {
+      Serial.println("ERROR: Event capture duration out of range (1-10000 ms)");
+      return false;
+    }
+  }
+
+  if (setupMask & SETUP_MASK_SENSOR_INTERVAL) {
+    SENSOR_READ_INTERVAL = nextInterval;
+  }
+  if (setupMask & SETUP_MASK_THRESHOLD) {
+    ACCEL_THRESHOLD = nextThreshold;
+  }
+  if (setupMask & SETUP_MASK_SAMPLE_RATE) {
+    LAB_TEST_SAMPLE_RATE_HZ = nextSampleRate;
+  }
+  if (setupMask & SETUP_MASK_DURATION) {
+    EVENT_CAPTURE_DURATION_MS = nextDuration;
+  }
+
+  if (!maskProvided) {
+    if (includeTruckId) {
+      setupMask |= SETUP_MASK_TRUCK_ID;
+    }
+    if (includeDescription) {
+      setupMask |= SETUP_MASK_DESCRIPTION;
+    }
+  }
+
+  if (setupMask & SETUP_MASK_TRUCK_ID) {
+    g_truckId = truckId;
+    g_includeTruckId = (truckId.length() > 0);
+  }
+
+  if (setupMask & SETUP_MASK_DESCRIPTION) {
+    g_description = description;
+    g_includeDescription = (description.length() > 0);
+  }
+
+  if (setupMask & SETUP_MASK_WIFI) {
+    for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+      g_wifiSsids[i] = nextSsids[i];
+      g_wifiPasswords[i] = nextPasswords[i];
+    }
+  }
+
+  Serial.println("SETUP applied:");
+  Serial.printf("  SENSOR_READ_INTERVAL: %lu ms\n", SENSOR_READ_INTERVAL);
+  Serial.printf("  EVENT_TRIGGER_THRESHOLD: %.3f g\n", ACCEL_THRESHOLD);
+  Serial.printf("  LAB_TEST_SAMPLE_RATE_HZ: %u Hz\n", LAB_TEST_SAMPLE_RATE_HZ);
+  Serial.printf("  EVENT_CAPTURE_DURATION_MS: %lu ms\n", EVENT_CAPTURE_DURATION_MS);
+
+  if ((setupMask & (SETUP_MASK_TRUCK_ID | SETUP_MASK_DESCRIPTION)) != 0) {
+    if (!saveTruckInfoToSd(g_truckId, g_description, g_includeTruckId, g_includeDescription)) {
+      Serial.println("SETUP warning: truck info requested but not saved.");
+    }
+  }
+
+  if ((setupMask & SETUP_MASK_WIFI) != 0) {
+    if (!saveWiFiProfilesToSd()) {
+      Serial.println("SETUP warning: WiFi profiles were not saved.");
+    }
+  }
+
+  int wifiConfigured = 0;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (g_wifiSsids[i].length() > 0) {
+      wifiConfigured++;
+      Serial.printf("  WiFi[%d]: %s\n", i + 1, g_wifiSsids[i].c_str());
+    }
+  }
+  Serial.printf("  WiFi profiles configured: %d\n", wifiConfigured);
+
+  return true;
+}
+
+void loadWiFiProfilesFromSd() {
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    g_wifiSsids[i] = "";
+    g_wifiPasswords[i] = "";
+  }
+
+  if (!sdCard.isInitialized() || !sdCard.fileExists(WIFI_PROFILE_FILE)) {
+    return;
+  }
+
+  File f = SD.open(WIFI_PROFILE_FILE, FILE_READ);
+  if (!f) {
+    return;
+  }
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    line.trim();
+    if (line.length() == 0 || line.startsWith("#")) {
+      continue;
+    }
+
+    int eq = line.indexOf('=');
+    if (eq <= 0) {
+      continue;
+    }
+
+    String key = line.substring(0, eq);
+    String value = line.substring(eq + 1);
+    key.trim();
+    value.trim();
+
+    if (key.length() == 7 && key.charAt(0) == 'w' && isDigit(key.charAt(1)) && key.endsWith("_ssid")) {
+      int idx = key.charAt(1) - '0';
+      if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
+        g_wifiSsids[idx] = value;
+      }
+    } else if (key.length() == 7 && key.charAt(0) == 'w' && isDigit(key.charAt(1)) && key.endsWith("_pass")) {
+      int idx = key.charAt(1) - '0';
+      if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
+        g_wifiPasswords[idx] = value;
+      }
+    }
+  }
+
+  f.close();
+
+  int loaded = 0;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (g_wifiSsids[i].length() > 0) {
+      loaded++;
+    }
+  }
+  Serial.printf("WiFi profiles loaded: %d\n", loaded);
+}
+
+bool startWifiLocalOffload() {
+  int configuredProfiles = 0;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (g_wifiSsids[i].length() > 0) configuredProfiles++;
+  }
+  if (configuredProfiles == 0) {
+    sendLoRaMessage("RSP:WIFI_NONE_CONFIGURED");
+    return false;
+  }
+
+  sendLoRaMessage("RSP:WIFI_START");
+
+  // Try each stored network in order
+  bool wifiConnected = false;
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    String ssid = g_wifiSsids[i];
+    if (ssid.length() == 0) continue;
+
+    sendLoRaMessage("RSP:WIFI_TRY:" + ssid);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), g_wifiPasswords[i].c_str());
+
+    int timeout = WIFI_CONNECT_TIMEOUT_SEC;
+    while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+      delay(1000);
+      timeout--;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      sendLoRaMessage("RSP:WIFI_CONNECTED:" + ssid);
+      wifiConnected = true;
+      break;
+    }
+    sendLoRaMessage("RSP:WIFI_FAIL:" + ssid);
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+
+  if (!wifiConnected) {
+    sendLoRaMessage("RSP:WIFI_FALLBACK_LORA");
+    return false;
+  }
+
+  // Open a local TCP server for the transmitter to connect to
+  WiFiServer server(WIFI_SERVER_PORT);
+  server.begin();
+  String myIp = WiFi.localIP().toString();
+  sendLoRaMessage("RSP:WIFI_SERVER:" + myIp + ":" + String(WIFI_SERVER_PORT));
+  Serial.printf("WiFi TCP server started at %s:%d\n", myIp.c_str(), WIFI_SERVER_PORT);
+
+  // Wait for the transmitter to connect (generous timeout for its WiFi connect + TCP connect)
+  WiFiClient client;
+  unsigned long serverStart = millis();
+  int lastRemaining = -1;
+  while (!client) {
+    client = server.available();
+    int elapsedSec = (int)((millis() - serverStart) / 1000UL);
+    int remainingSec = WIFI_CLIENT_TIMEOUT_SEC - elapsedSec;
+    if (remainingSec != lastRemaining && remainingSec >= 0) {
+      sendLoRaMessage("RSP:WIFI_WAIT:" + String(remainingSec));
+      lastRemaining = remainingSec;
+    }
+    if (millis() - serverStart > (WIFI_CLIENT_TIMEOUT_SEC * 1000UL)) {
+      sendLoRaMessage("RSP:WIFI_TX_TIMEOUT");
+      server.close();
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+      sendLoRaMessage("RSP:WIFI_FALLBACK_LORA");
+      return false;
+    }
+    delay(100);
+  }
+
+  sendLoRaMessage("RSP:WIFI_TX_CONNECTED");
+  Serial.println("Transmitter TCP connected, streaming events...");
+
+  // Stream all stored events over TCP using DATA: lines
+  // TCP has no 180-byte packet limit so full lines can be sent without chunking
+  if (sdCard.isInitialized() && sdCard.fileExists("/events")) {
+    File root = SD.open("/events");
+    if (root && root.isDirectory()) {
+      File file = root.openNextFile();
+      while (file) {
+        if (!file.isDirectory()) {
+          String filename = String(file.name());
+          String baseName = filename;
+          int slashIdx = baseName.lastIndexOf('/');
+          if (slashIdx >= 0 && slashIdx < (baseName.length() - 1)) {
+            baseName = baseName.substring(slashIdx + 1);
+          }
+          if (baseName.startsWith("event ") && baseName.endsWith(".csv")) {
+            // Emit file boundary marker so the UI can save each event as its own file
+            client.println("DATA:EVENT_FILE:" + baseName);
+            while (file.available()) {
+              String line = file.readStringUntil('\n');
+              line.replace("\r", "");
+              line.trim();
+              if (line.length() == 0 || line.startsWith("timestamp,")) continue;
+              client.println("DATA:" + line);
+              delay(5);
+            }
+          }
+          file.close();
+        } else {
+          file.close();
+        }
+        file = root.openNextFile();
+      }
+      root.close();
+    }
+  }
+
+  // End-of-transfer marker read by transmitter to trigger END:D on serial
+  client.println("END:D");
+  client.flush();
+  delay(500);
+  client.stop();
+  server.close();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  // Auto-clear events after successful Wi-Fi offload.
+  deleteAllEventFiles();
+  sendLoRaMessage("RSP:CLEAR_OK");
+  Serial.println("WiFi TCP offload complete.");
+  return true;
+}
+
+/**
+ * Apply configuration (called after successful parsing)
+ * Can reconfigure I2C bus or other sensors here if needed
+ */
+void applyConfiguration() {
+  Serial.println("\n✓ Configuration applied successfully!");
+  Serial.println("Unit is now using new parameters.");
+}
+
+bool handleLoRaTimeSyncPacket(const String& packet) {
+  if (!packet.startsWith("TIME:")) {
+    return false;
+  }
+
+  String dateTime = packet.substring(5);
+  dateTime.trim();
+
+  Serial.printf("LoRa TIME received: %s\n", dateTime.c_str());
+
+  if (dateTime.length() != 19) {
+    sendLoRaMessage("RSP:TIME_SYNC_ERR:FORMAT");
+    return true;
+  }
+
+  if (setTimeManually(dateTime.c_str())) {
+    sendLoRaMessage("RSP:TIME_SYNC_OK");
+  } else {
+    sendLoRaMessage("RSP:TIME_SYNC_ERR:VALUE");
+  }
+
+  return true;
+}
+
+void handleLoRaCommandPacket(const String& packet) {
+  if (!packet.startsWith("CMD:") || packet.length() != 5) {
+    // Ignore malformed or unrelated packets to avoid serial spam.
+    return;
+  }
+
+  char command = packet.charAt(4);
+  Serial.printf("LoRa CMD received: %c\n", command);
+
+  if (command == 'd' || command == 'D') {
+    sendLoRaMessage("RSP:BEGIN_D");
+    bool wifiOffloaded = startWifiLocalOffload();
+    if (!wifiOffloaded) {
+      // Wi-Fi unavailable — fall back to LoRa streaming
+      bool sentData = streamStoredEventsOverLoRa();
+      if (!sentData) {
+        sendLoRaMessage("RSP:NO_DATA");
+      }
+      sendLoRaMessage("END:D");  // Only sent via LoRa when LoRa path was used
+      // Auto-clear events after LoRa fallback offload completes.
+      deleteAllEventFiles();
+      sendLoRaMessage("RSP:CLEAR_OK");
+    }
+    // When Wi-Fi path succeeded, END:D was already sent over TCP to the transmitter
+    return;
+  }
+
+  if (command == 'n' || command == 'N') {
+    // Unit discovery scan response
+    if (g_includeTruckId && g_truckId.length() > 0) {
+      sendLoRaMessage("RSP:ID:" + g_truckId);
+    } else {
+      sendLoRaMessage("RSP:ID:UNNAMED");
+    }
+    return;
+  }
+
+  if (command == 'z' || command == 'Z') {
+    bool tareSuccess = nau7802.tare(100);
+    if (tareSuccess) {
+      sendLoRaMessage("RSP:TARE_OK");
+    } else {
+      sendLoRaMessage("RSP:TARE_FAIL");
+    }
+    return;
+  }
+
+  if (command == 'c' || command == 'C') {
+    // Clear all events from SD card
+    deleteAllEventFiles();
+    sendLoRaMessage("RSP:CLEAR_OK");
+    return;
+  }
+
+  // Unsupported command for remote LoRa control.
+  sendLoRaMessage("RSP:ERR_UNSUPPORTED");
+}
+
+void processLoRaPackets() {
+  if (!loraPacketReceived) {
+    return;
+  }
+
+  loraPacketReceived = false;
+  String packet;
+  int rxState = loraRadio.readData(packet);
+  if (rxState == RADIOLIB_ERR_NONE) {
+    packet.trim();
+    if (packet.startsWith("CMD:") && packet.length() == 5) {
+      handleLoRaCommandPacket(packet);
+    } else if (packet.startsWith("TIME:")) {
+      handleLoRaTimeSyncPacket(packet);
+    } else if (packet.startsWith("SETUP:")) {
+      if (parseSetupPacket(packet)) {
+        applyConfiguration();
+        sendLoRaMessage("RSP:SETUP_OK");
+      } else {
+        sendLoRaMessage("RSP:SETUP_ERR");
+      }
+    }
+  } else {
+    Serial.printf("LoRa RX read failed (%d)\n", rxState);
+  }
+
+  restartLoRaReceive();
+}
 
 /**
  * Circular buffer for continuous accelerometer data capture
@@ -31,9 +705,6 @@ struct AccelSample {
   float x;
   float y;
   float z;
-  int32_t strainRaw;
-  int32_t strainZeroed;
-  float strainMicro;
   unsigned long timestamp;
 };
 
@@ -214,27 +885,57 @@ String getFormattedTime() {
 }
 
 /**
+ * Load truck identity from SD card at startup
+ */
+void loadTruckInfoFromSd() {
+  if (!sdCard.isInitialized() || !sdCard.fileExists("/truck info/truck_id.txt")) {
+    return;
+  }
+  File f = SD.open("/truck info/truck_id.txt", FILE_READ);
+  if (!f) { return; }
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    line.trim();
+    if (line.startsWith("truck_id=")) {
+      String val = line.substring(9);
+      val.trim();
+      g_truckId = val;
+    } else if (line.startsWith("include_truck_id=")) {
+      String val2 = line.substring(17);
+      val2.trim();
+      g_includeTruckId = (val2 == "1");
+    } else if (line.startsWith("description=")) {
+      String val3 = line.substring(12);
+      val3.trim();
+      g_description = val3;
+    } else if (line.startsWith("include_description=")) {
+      String val4 = line.substring(20);
+      val4.trim();
+      g_includeDescription = (val4 == "1");
+    }
+  }
+  f.close();
+  if (g_truckId.length() > 0) {
+    Serial.printf("Truck ID loaded: %s\n", g_truckId.c_str());
+  }
+}
+
+/**
  * Delete all event files from SD card
  */
 void deleteAllEventFiles() {
+  if (!sdCard.isInitialized()) {
+    Serial.println("SD card is not initialized. Cannot clear files.");
+    return;
+  }
+
   // Delete event files
   if (sdCard.fileExists("/events")) {
-    File root = SD.open("/events");
-    if (root && root.isDirectory()) {
-      File file = root.openNextFile();
-      while (file) {
-        if (!file.isDirectory()) {
-          String filename = String(file.name());
-          String fullPath = "/events/" + filename;
-          file.close();
-          sdCard.deleteFile(fullPath.c_str());
-        } else {
-          file.close();
-        }
-        file = root.openNextFile();
-      }
-      root.close();
+    if (sdCard.deleteAllFilesInDirectory("/events")) {
       Serial.println("All event files deleted.");
+    } else {
+      Serial.println("Some event files could not be deleted.");
     }
   } else {
     Serial.println("No events directory found.");
@@ -242,22 +943,10 @@ void deleteAllEventFiles() {
   
   // Delete lab-testing files
   if (sdCard.fileExists("/lab-testing")) {
-    File root = SD.open("/lab-testing");
-    if (root && root.isDirectory()) {
-      File file = root.openNextFile();
-      while (file) {
-        if (!file.isDirectory()) {
-          String filename = String(file.name());
-          String fullPath = "/lab-testing/" + filename;
-          file.close();
-          sdCard.deleteFile(fullPath.c_str());
-        } else {
-          file.close();
-        }
-        file = root.openNextFile();
-      }
-      root.close();
+    if (sdCard.deleteAllFilesInDirectory("/lab-testing")) {
       Serial.println("All lab-testing files deleted.");
+    } else {
+      Serial.println("Some lab-testing files could not be deleted.");
     }
   } else {
     Serial.println("No lab-testing directory found.");
@@ -292,25 +981,23 @@ void offloadData() {
 /**
  * Event capture function
  * Called when accelerometer threshold is exceeded
- * FAST: Captures 20 samples immediately, THEN formats and saves
+ * FAST: Captures paired samples immediately, THEN formats and saves
  */
 void captureEvent(float triggerX, float triggerY, float triggerZ) {
-  static int eventNumber = 0;
-  
   unsigned long captureStart = millis();
   
   // Create temporary array to store samples during fast capture
-  AccelSample eventSamples[EVENT_MAX_SAMPLES];
+  EventLogger_Module::EventSample eventSamples[EVENT_MAX_SAMPLES];
   int sampleCount = 1;
   
   // Store trigger sample as first sample
   eventSamples[0].x = triggerX;
   eventSamples[0].y = triggerY;
   eventSamples[0].z = triggerZ;
-  eventSamples[0].strainRaw = nau7802.readRaw();
-  eventSamples[0].strainZeroed = eventSamples[0].strainRaw - nau7802.getZeroOffset();
-  eventSamples[0].strainMicro = nau7802.calculateStrain(eventSamples[0].strainZeroed, 3.3, 2.0) * 1000000.0;
-  eventSamples[0].timestamp = millis();
+  int32_t triggerStrainRaw = nau7802.readRaw();
+  int32_t triggerStrainZeroed = triggerStrainRaw - nau7802.getZeroOffset();
+  eventSamples[0].strainMicro = toCalibratedMicrostrain(
+      nau7802.calculateStrain(triggerStrainZeroed, 3.3, 2.0));
   
   Serial.printf("\n!!! EVENT TRIGGERED !!! Capturing for %d ms...", EVENT_CAPTURE_DURATION_MS);
   
@@ -329,10 +1016,10 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
       eventSamples[i].z = 0.0;
     }
 
-    eventSamples[i].strainRaw = nau7802.readRaw();
-    eventSamples[i].strainZeroed = eventSamples[i].strainRaw - nau7802.getZeroOffset();
-    eventSamples[i].strainMicro = nau7802.calculateStrain(eventSamples[i].strainZeroed, 3.3, 2.0) * 1000000.0;
-    eventSamples[i].timestamp = millis();
+    int32_t strainRaw = nau7802.readRaw();
+    int32_t strainZeroed = strainRaw - nau7802.getZeroOffset();
+    eventSamples[i].strainMicro = toCalibratedMicrostrain(
+      nau7802.calculateStrain(strainZeroed, 3.3, 2.0));
 
     sampleCount++;
     Serial.print(".");
@@ -349,13 +1036,6 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
   Serial.println("Saving to SD card...");
   unsigned long saveStart = millis();
   
-  // Get next event number from SD card
-  eventNumber = sdCard.getNextEventNumber("/events", "event ");
-  
-  // Create filename
-  char filename[32];
-  snprintf(filename, sizeof(filename), "/events/event %d.txt", eventNumber);
-  
   // Read temperature and humidity
   float temp = 0.0, humidity = 0.0;
   if (sht45.read()) {
@@ -363,43 +1043,24 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
     humidity = sht45.getHumidity();
   }
   
-  // Pre-allocate large string buffer
-  String eventData;
-  eventData.reserve(1024);
-  
-  // Build event header
-  eventData = "=== EVENT " + String(eventNumber) + " ===\n";
-  eventData += "Timestamp: " + getFormattedTime() + "\n";
-  eventData += "Temperature: " + String(temp, 2) + " C\n";
-  eventData += "Humidity: " + String(humidity, 2) + " %\n";
-  eventData += "CaptureDurationMs: " + String(EVENT_CAPTURE_DURATION_MS) + "\n";
-  eventData += "CapturedSamples: " + String(sampleCount) + "\n";
-  eventData += "\nPaired Samples (Acceleration + Strain):\n";
-  eventData += "Sample, ElapsedMs, X(g), Y(g), Z(g), StrainRaw, StrainZeroed, Strain(uE)\n";
-  
-  // Format all captured samples
-  char sampleLine[160];
-  for (int i = 0; i < sampleCount; i++) {
-    unsigned long elapsedMs = eventSamples[i].timestamp - captureStart;
-    snprintf(sampleLine, sizeof(sampleLine), "%d, %lu, %.3f, %.3f, %.3f, %ld, %ld, %.2f\n", 
-             i+1, 
-             elapsedMs,
-             eventSamples[i].x, 
-             eventSamples[i].y, 
-             eventSamples[i].z,
-             eventSamples[i].strainRaw,
-             eventSamples[i].strainZeroed,
-             eventSamples[i].strainMicro);
-    eventData += sampleLine;
-  }
-  
-  // Write to SD card
-  sdCard.writeFile(filename, eventData.c_str(), false);
+  // Save CSV data row only (no header row)
+  String savedFilename;
+  bool writeOk = eventLogger.saveEventCsv(eventSamples,
+                                          sampleCount,
+                                          temp,
+                                          humidity,
+                                          getFormattedTime(),
+                                          nullptr,
+                                          &savedFilename);
   
   unsigned long saveTime = millis() - saveStart;
   unsigned long totalTime = millis() - captureStart;
   
-  Serial.printf("Saved to: %s\n", filename);
+  if (writeOk) {
+    Serial.printf("Saved to: %s\n", savedFilename.c_str());
+  } else {
+    Serial.printf("Failed to save event file: %s\n", savedFilename.c_str());
+  }
   Serial.printf("Capture: %lums, Save: %lums, Total: %lums\n\n", captureTime, saveTime, totalTime);
 }
 
@@ -408,9 +1069,10 @@ void captureEvent(float triggerX, float triggerY, float triggerZ) {
  * Called during setup to show previous events
  */
 void playbackEvents() {
-  Serial.println("\n======================================");
-  Serial.println("      PREVIOUS EVENTS PLAYBACK");
-  Serial.println("======================================\n");
+  if (!sdCard.isInitialized()) {
+    Serial.println("SD card is not initialized. Cannot playback events.\n");
+    return;
+  }
   
   // Check if events directory exists
   if (!sdCard.fileExists("/events")) {
@@ -418,41 +1080,11 @@ void playbackEvents() {
     return;
   }
   
-  // List all files in events directory
-  File root = SD.open("/events");
-  if (!root || !root.isDirectory()) {
-    Serial.println("Failed to open events directory\n");
-    return;
-  }
-  
-  bool foundEvents = false;
-  File file = root.openNextFile();
-  while (file) {
-    if (!file.isDirectory()) {
-      String filename = String(file.name());
-      if (filename.startsWith("event ")) {
-        foundEvents = true;
-        Serial.println("--------------------------------------");
-        Serial.printf("Reading: %s\n", file.name());
-        Serial.println("--------------------------------------");
-        
-        // Read and print file contents
-        String fullPath = "/events/" + filename;
-        String content = sdCard.readFile(fullPath.c_str());
-        Serial.println(content);
-        Serial.println();
-      }
-    }
-    file = root.openNextFile();
-  }
+  bool foundEvents = sdCard.printCsvDataRows("/events", "event ");
   
   if (!foundEvents) {
     Serial.println("No previous events found.\n");
   }
-  
-  Serial.println("======================================");
-  Serial.println("      END OF PLAYBACK");
-  Serial.println("======================================\n");
 }
 
 void setup() {
@@ -460,6 +1092,22 @@ void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
   delay(1000);
   Serial.println("\n\n=== Heltec Capstone Receiver Starting ===\n");
+
+  Serial.println("Initializing LoRa radio...");
+  int loraState = loraRadio.begin(LORA_FREQUENCY_MHZ,
+                                  LORA_BANDWIDTH_KHZ,
+                                  LORA_SPREADING_FACTOR,
+                                  LORA_CODING_RATE,
+                                  LORA_SYNC_WORD,
+                                  LORA_TX_POWER_DBM,
+                                  LORA_PREAMBLE_LEN);
+  if (loraState == RADIOLIB_ERR_NONE) {
+    loraRadio.setDio1Action(setLoRaFlag);
+    restartLoRaReceive();
+    Serial.println("LoRa: OK");
+  } else {
+    Serial.printf("LoRa: FAILED (%d)\n", loraState);
+  }
 
   // Initialize OLED Display - DISABLED for performance
   /*
@@ -510,6 +1158,10 @@ void setup() {
   Serial.println();
   spiSD.begin(SDCARD_SCK, SDCARD_MISO, SDCARD_MOSI, SDCARD_CS);
   if (sdCard.begin()) {
+    // Load truck identity for LoRa discovery responses
+    loadTruckInfoFromSd();
+    // Load stored WiFi profiles for offload retries
+    loadWiFiProfilesFromSd();
     // Playback previous events
     playbackEvents();
   } else {
@@ -606,7 +1258,7 @@ void processSerialCommand(char command) {
         
         // Example strain calculation (assuming 3.3V excitation and GF=2.0)
         float strain = nau7802.calculateStrain(filtered - raw + reading, 3.3, 2.0);
-        float microstrain = strain * 1000000.0; // Convert to microstrain
+        float microstrain = toCalibratedMicrostrain(strain); // Convert to calibrated microstrain
         Serial.printf("\nEstimated Strain: %.2f με (microstrain)\n", microstrain);
         
         // Interpret the strain value
@@ -712,7 +1364,7 @@ void processSerialCommand(char command) {
           int32_t filtered = nau7802.readFiltered(20); // Outlier rejection
           int32_t zeroed = filtered - nau7802.getZeroOffset(); // Apply tare offset
           float strain = nau7802.calculateStrain(zeroed, 3.3, 2.0);
-          float microstrain = strain * 1000000.0;
+          float microstrain = toCalibratedMicrostrain(strain);
           
           float elapsedTime = (millis() - startTime) / 1000.0;
           unsigned long sampleMs = millis() - sampleStart;
@@ -851,7 +1503,7 @@ void processSerialCommand(char command) {
           int32_t raw = nau7802.readRaw();
           int32_t zeroed = raw - nau7802.getZeroOffset();
           float strain = nau7802.calculateStrain(zeroed, 3.3, 2.0);
-          float microstrain = strain * 1000000.0;
+          float microstrain = toCalibratedMicrostrain(strain);
           float elapsedTime = (millis() - startTime) / 1000.0;
           
           // Store in memory
@@ -924,8 +1576,31 @@ void processSerialCommand(char command) {
 }
 
 void loop() {
-  // Check for serial commands
+  // Handle incoming command packets from transmitter
+  processLoRaPackets();
+
+  // Check for serial commands and setup packets
   if (Serial.available() > 0) {
+    if (Serial.peek() == 'S') {
+      String setupLine = Serial.readStringUntil('\n');
+      setupLine.trim();
+
+      if (setupLine.startsWith("SETUP:")) {
+        if (parseSetupPacket(setupLine)) {
+          applyConfiguration();
+          sendLoRaMessage("RSP:SETUP_OK");
+        } else {
+          Serial.println("SETUP parse error");
+        }
+        return;
+      }
+
+      if (setupLine.length() == 1) {
+        processSerialCommand(setupLine.charAt(0));
+        return;
+      }
+    }
+
     char command = Serial.read();
     processSerialCommand(command);
   }

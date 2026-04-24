@@ -7,3 +7,16 @@ For Data Purposes:
 4) Any of the #define constants
 
 5) LoRa to offload rather than Wi-Fi | Maybe both?
+
+TODO Order:
+Store the known units in the dashboard locally. Store the Wi-Fi credentials locally.
+
+3) Saving Data to App Data / Locally Selected Location
+4) Way to visualize / view the data?
+
+Not! Wabash National anymore. Just Wabash.
+
+As walking through the steps, make documentation.
+
+NetHouse
+@AAMBN3Ts4G0od$&
