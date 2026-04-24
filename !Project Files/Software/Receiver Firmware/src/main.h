@@ -122,6 +122,7 @@ void loop();
 // Event capture functions
 void captureEvent(float triggerX, float triggerY, float triggerZ);
 void playbackEvents();
+void deleteAllEventFiles();
 
 // Time sync functions
 bool syncTime();

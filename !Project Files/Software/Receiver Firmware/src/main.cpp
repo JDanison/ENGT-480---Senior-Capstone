@@ -68,6 +68,7 @@ constexpr uint8_t SETUP_MASK_LEGACY_DEFAULT = SETUP_MASK_SENSOR_INTERVAL |
 
 void processSerialCommand(char command);
 bool setTimeManually(const char* dateTimeStr);
+void deleteAllEventFiles();
 
 #if defined(ESP8266) || defined(ESP32)
   ICACHE_RAM_ATTR
@@ -569,6 +570,9 @@ bool startWifiLocalOffload() {
   server.close();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  // Auto-clear events after successful Wi-Fi offload.
+  deleteAllEventFiles();
+  sendLoRaMessage("RSP:CLEAR_OK");
   Serial.println("WiFi TCP offload complete.");
   return true;
 }
@@ -625,6 +629,9 @@ void handleLoRaCommandPacket(const String& packet) {
         sendLoRaMessage("RSP:NO_DATA");
       }
       sendLoRaMessage("END:D");  // Only sent via LoRa when LoRa path was used
+      // Auto-clear events after LoRa fallback offload completes.
+      deleteAllEventFiles();
+      sendLoRaMessage("RSP:CLEAR_OK");
     }
     // When Wi-Fi path succeeded, END:D was already sent over TCP to the transmitter
     return;
@@ -647,6 +654,13 @@ void handleLoRaCommandPacket(const String& packet) {
     } else {
       sendLoRaMessage("RSP:TARE_FAIL");
     }
+    return;
+  }
+
+  if (command == 'c' || command == 'C') {
+    // Clear all events from SD card
+    deleteAllEventFiles();
+    sendLoRaMessage("RSP:CLEAR_OK");
     return;
   }
 

@@ -3,16 +3,18 @@
 import os
 import sys
 import json
+import csv
 import time
 import datetime
 import subprocess
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 import serial
+from tksheet import Sheet
 
 from serial.tools import list_ports
 
@@ -84,6 +86,16 @@ def _default_data_path() -> Path:
     return _APP_DIR / "data"
 
 
+def _excel_column_name(index: int) -> str:
+    """Convert a zero-based column index to an Excel-style column label."""
+    label = ""
+    index += 1
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        label = chr(65 + remainder) + label
+    return label
+
+
 class MainWindow:
     def __init__(self) -> None:
         ctk.set_appearance_mode("system")
@@ -136,6 +148,7 @@ class MainWindow:
         self._offload_lora_row_buf: str = ""
         self._offload_saved_files: list[Path] = []
         self._offload_session_dir: Path | None = None
+        self._offload_summary_file: Path | None = None
 
         # Data storage path (defaults to AppData, overridden by saved settings)
         self.data_path_var = tk.StringVar(value=str(_default_data_path()))
@@ -145,6 +158,8 @@ class MainWindow:
         self.port_var     = tk.StringVar(value="")
         self.baud_var     = tk.StringVar(value="115200")
         self.command_var  = tk.StringVar(value="")
+        self.viewer_sheet_var = tk.StringVar(value="")
+        self.viewer_filter_var = tk.StringVar(value="")
         self.theme_var    = tk.StringVar(value="system")
         self.density_var  = tk.StringVar(value="Comfortable")
         self.search_var      = tk.StringVar(value="")
@@ -192,6 +207,36 @@ class MainWindow:
         self.pages: dict[str, ctk.CTkFrame | ctk.CTkScrollableFrame] = {}
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
         self._active_page_name: str | None = None
+        self._viewer_workbook_path: Path | None = None
+        self._viewer_sheet_rows: list[list[str]] = []
+        self._viewer_filtered_rows: list[list[str]] = []
+        self._viewer_header_row: list[str] = []
+        self._viewer_col_start = 0
+        self._viewer_col_span = 10
+        self._viewer_sort_column: int | None = None
+        self._viewer_sort_descending = False
+        self.viewer_tree: ttk.Treeview | None = None
+        self.viewer_sheet: Sheet | None = None
+        self.viewer_grid_card: ctk.CTkFrame | None = None
+        self.viewer_stats_card: ctk.CTkFrame | None = None
+        self.viewer_kpi_labels: dict[str, ctk.CTkLabel] = {}
+        self.viewer_tree_xscroll: tk.Scrollbar | None = None
+        self.viewer_status_label: ctk.CTkLabel | None = None
+        self.viewer_source_label: ctk.CTkLabel | None = None
+        self.viewer_path_label: ctk.CTkLabel | None = None
+        self.viewer_meta_label: ctk.CTkLabel | None = None
+        self.viewer_sheet_info_label: ctk.CTkLabel | None = None
+        self.viewer_col_window_label: ctk.CTkLabel | None = None
+        self.viewer_hint_label: ctk.CTkLabel | None = None
+        self.viewer_sheet_combo: ctk.CTkComboBox | None = None
+        self._viewer_detail_window: ctk.CTkToplevel | None = None
+        self._viewer_strain_low_thresh: float = 0.0
+        self._viewer_strain_high_thresh: float = 0.0
+        self._viewer_max_strain_row_idx: int = -1
+        self._viewer_max_accel_row_idx: int = -1
+        self._viewer_max_strain_col_idx: int = -1
+        self._viewer_max_accel_col_idx: int = -1
+        self.viewer_filter_var.trace_add("write", lambda *_: self._apply_viewer_filter())
 
         # set window icon
         icon_path = _asset("assets/images/icon.ico")
@@ -280,6 +325,15 @@ class MainWindow:
         )
         self.nav_buttons["Data Offload"].grid(row=3, column=0, sticky="ew", padx=16, pady=4)
 
+        self.nav_buttons["Data Viewer"] = ctk.CTkButton(
+            nav_card,
+            text="Data Viewer",
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=lambda: self._show_page("Data Viewer"),
+        )
+        self.nav_buttons["Data Viewer"].grid(row=4, column=0, sticky="ew", padx=16, pady=4)
+
         self.nav_buttons["Settings"] = ctk.CTkButton(
             nav_card,
             text="Settings",
@@ -287,7 +341,7 @@ class MainWindow:
             hover_color=BTN_GREY_HOVER,
             command=lambda: self._show_page("Settings"),
         )
-        self.nav_buttons["Settings"].grid(row=4, column=0, sticky="ew", padx=16, pady=(4, 14))
+        self.nav_buttons["Settings"].grid(row=5, column=0, sticky="ew", padx=16, pady=(4, 14))
 
         quick_status = ctk.CTkFrame(sidebar, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         quick_status.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
@@ -347,6 +401,7 @@ class MainWindow:
         self._build_dashboard_page()
         self._build_settings_page()
         self._build_live_page()
+        self._build_data_viewer_page()
         self._build_unit_setup_page()
 
     def _create_stat_card(self, parent: ctk.CTkFrame, column: int, title: str, initial: str) -> ctk.CTkLabel:
@@ -368,6 +423,9 @@ class MainWindow:
 
         self.pages[page_name].grid(row=0, column=0, sticky="nsew")
         self._active_page_name = page_name
+
+        if page_name == "Data Viewer":
+            self._refresh_data_viewer()
 
         for name, button in self.nav_buttons.items():
             if name == page_name:
@@ -1002,6 +1060,1211 @@ class MainWindow:
                       command=self._export_log).grid(
             row=0, column=1, padx=(6, 0), sticky='ew')
 
+    def _build_data_viewer_page(self) -> None:
+        page = ctk.CTkFrame(self.page_container, corner_radius=0, fg_color="transparent")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(3, weight=0)
+        page.grid_rowconfigure(4, weight=1)
+        self.pages["Data Viewer"] = page
+
+        header = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header,
+            text="Data Viewer",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 4))
+        ctk.CTkLabel(
+            header,
+            text="Spreadsheet-style preview of saved offload workbooks",
+            text_color=("#475569", "#94A3B8"),
+            font=ctk.CTkFont(size=13),
+        ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 14))
+
+        info_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        info_card.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        info_card.grid_columnconfigure(0, weight=1)
+        self.viewer_path_label = ctk.CTkLabel(
+            info_card,
+            text="Selected Offload Workbook",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            justify="left",
+            anchor="w",
+            wraplength=760,
+        )
+        self.viewer_path_label.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 4))
+        self.viewer_meta_label = ctk.CTkLabel(
+            info_card,
+            text="Truck metadata will appear here.",
+            text_color=("#DCE7F7", "#E2E8F0"),
+            font=ctk.CTkFont(size=18, weight="bold"),
+            justify="left",
+            anchor="w",
+            wraplength=760,
+        )
+        self.viewer_meta_label.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self.viewer_sheet_info_label = ctk.CTkLabel(
+            info_card,
+            text="Offload Rows: 0 | Total Columns: 0",
+            text_color=("#93C5FD", "#93C5FD"),
+            font=ctk.CTkFont(size=15, weight="bold"),
+            justify="left",
+            anchor="w",
+        )
+        self.viewer_sheet_info_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 12))
+
+        controls_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        controls_card.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        controls_card.grid_columnconfigure(0, weight=1)
+        controls_card.grid_columnconfigure(1, weight=0)
+        controls_card.grid_columnconfigure(2, weight=0)
+        controls_card.grid_columnconfigure(3, weight=0)
+
+        self.viewer_source_label = ctk.CTkLabel(
+            controls_card,
+            text="Workbook: None selected",
+            justify="left",
+            anchor="w",
+            corner_radius=8,
+            fg_color=("#E5E7EB", "#374151"),
+            text_color=("#0F172A", "#F3F4F6"),
+            font=ctk.CTkFont(size=13, weight="bold"),
+            padx=10,
+            pady=8,
+        )
+        self.viewer_source_label.grid(row=0, column=0, sticky="ew", padx=(16, 8), pady=(12, 10))
+
+        ctk.CTkButton(
+            controls_card,
+            text="Open Workbook",
+            fg_color=WABASH_BLUE,
+            hover_color=WABASH_BLUE_HOVER,
+            command=self._open_viewer_workbook_picker,
+            width=140,
+        ).grid(row=0, column=1, sticky="ew", padx=8, pady=(12, 10))
+
+        ctk.CTkButton(
+            controls_card,
+            text="Close Workbook",
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=self._clear_viewer_selection,
+            width=130,
+        ).grid(row=0, column=2, sticky="ew", padx=8, pady=(12, 10))
+
+        self.viewer_col_window_label = ctk.CTkLabel(
+            controls_card,
+            text="Columns: -",
+            text_color=("#475569", "#94A3B8"),
+            justify="left",
+            anchor="w",
+        )
+        self.viewer_col_window_label.grid(row=0, column=3, sticky="e", padx=(8, 16), pady=(12, 10))
+
+        self.viewer_hint_label = ctk.CTkLabel(
+            controls_card,
+            text="Pinned columns stay visible. Drag the horizontal scrollbar or use arrow keys to move through the remaining data. Click any header to sort.",
+            text_color=("#475569", "#94A3B8"),
+            justify="left",
+            anchor="w",
+        )
+        self.viewer_hint_label.grid(row=1, column=0, columnspan=4, sticky="ew", padx=(16, 16), pady=(0, 2))
+
+        self.viewer_status_label = ctk.CTkLabel(
+            controls_card,
+            text="Open a workbook to inspect combined offload data.",
+            text_color=("#475569", "#94A3B8"),
+            justify="left",
+            anchor="w",
+        )
+        self.viewer_status_label.grid(row=2, column=0, columnspan=4, sticky="ew", padx=(16, 16), pady=(0, 10))
+
+        # --- Stats Strip (row 3) ---
+        stats_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        stats_card.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        self.viewer_stats_card = stats_card
+        # (name, clickable_jump_target)
+        kpi_defs = [
+            ("Date Range", False),
+            ("Events", False),
+            ("Avg Temp (°F)", False),
+            ("Avg RH (%)", False),
+            ("Max |Strain|", True),
+            ("Max Accel Mag", True),
+        ]
+        for col_i, (kpi_name, clickable) in enumerate(kpi_defs):
+            stats_card.grid_columnconfigure(col_i, weight=1)
+            cell = ctk.CTkFrame(stats_card, corner_radius=10, fg_color=("#E5E7EB", "#1E293B"))
+            cell.grid(row=0, column=col_i, padx=10, pady=10, sticky="ew")
+            cell.grid_columnconfigure(0, weight=1)
+            hint = " ↗ jump" if clickable else ""
+            title_lbl = ctk.CTkLabel(cell, text=kpi_name + hint, font=ctk.CTkFont(size=11),
+                                     text_color=("#2563EB", "#60A5FA") if clickable else ("#475569", "#94A3B8"))
+            title_lbl.grid(row=0, column=0, pady=(8, 0))
+            value_font_size = 15 if kpi_name == "Date Range" else 18
+            val_lbl = ctk.CTkLabel(cell, text="—", font=ctk.CTkFont(size=value_font_size, weight="bold"),
+                                   text_color=("#0F172A", "#F1F5F9"))
+            val_lbl.grid(row=1, column=0, pady=(0, 8))
+            self.viewer_kpi_labels[kpi_name] = val_lbl
+            if clickable:
+                for widget in (cell, title_lbl, val_lbl):
+                    widget.configure(cursor="hand2")
+                    widget.bind("<Button-1>", lambda _e, k=kpi_name: self._jump_to_viewer_max(k))
+        stats_card.grid_remove()
+
+        grid_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
+        grid_card.grid(row=4, column=0, sticky="nsew")
+        grid_card.grid_columnconfigure(0, weight=1)
+        grid_card.grid_rowconfigure(0, weight=1)
+        self.viewer_grid_card = grid_card
+
+        sheet_host = tk.Frame(grid_card, bd=0, highlightthickness=0, bg="#FFFFFF")
+        sheet_host.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        sheet_host.grid_columnconfigure(0, weight=1)
+        sheet_host.grid_rowconfigure(0, weight=1)
+
+        self.viewer_sheet = Sheet(
+            sheet_host,
+            headers=[],
+            data=[],
+            show_x_scrollbar=True,
+            show_y_scrollbar=True,
+            theme="light blue",
+        )
+        self.viewer_sheet.grid(row=0, column=0, sticky="nsew")
+        self.viewer_sheet.enable_bindings((
+            "single_select",
+            "row_select",
+            "column_select",
+            "drag_select",
+            "arrowkeys",
+            "column_width_resize",
+            "double_click_column_resize",
+            "right_click_popup_menu",
+            "rc_select",
+            "copy",
+            "select_all",
+        ))
+        self.viewer_sheet.extra_bindings("cell_select", lambda _ev: self._sync_viewer_column_label())
+        if hasattr(self.viewer_sheet, "MT"):
+            self.viewer_sheet.MT.bind("<Double-1>", self._on_viewer_row_double_click)
+
+        grid_card.grid_remove()
+
+        self._set_viewer_status("Open a workbook from the AppData data folder to start browsing offload workbooks.")
+
+    def _set_viewer_status(self, message: str) -> None:
+        if self.viewer_status_label is not None:
+            self.viewer_status_label.configure(text=message)
+
+    def _set_viewer_grid_visible(self, visible: bool) -> None:
+        if self.viewer_grid_card is None:
+            return
+        if visible:
+            self.viewer_grid_card.grid()
+        else:
+            self.viewer_grid_card.grid_remove()
+
+    def _set_viewer_stats_visible(self, visible: bool) -> None:
+        if self.viewer_stats_card is None:
+            return
+        if visible:
+            self.viewer_stats_card.grid()
+        else:
+            self.viewer_stats_card.grid_remove()
+
+    def _viewer_pinned_indices(self, total_cols: int) -> list[int]:
+        preferred = ["Event #", "Time Stamp", "Temp", "RH"]
+        pinned: list[int] = []
+        for name in preferred:
+            for idx, header in enumerate(self._viewer_header_row[:total_cols]):
+                if idx in pinned:
+                    continue
+                if header.strip().lower() == name.lower():
+                    pinned.append(idx)
+                    break
+        return pinned
+
+    def _viewer_scrollable_indices(self, total_cols: int) -> list[int]:
+        pinned = set(self._viewer_pinned_indices(total_cols))
+        return [idx for idx in range(total_cols) if idx not in pinned]
+
+    def _viewer_visible_indices(self, total_cols: int) -> list[int]:
+        pinned = self._viewer_pinned_indices(total_cols)
+        scrollable = self._viewer_scrollable_indices(total_cols)
+        if not scrollable:
+            return pinned
+        max_start = max(0, len(scrollable) - self._viewer_col_span)
+        self._viewer_col_start = min(max(self._viewer_col_start, 0), max_start)
+        return pinned + scrollable[self._viewer_col_start:self._viewer_col_start + self._viewer_col_span]
+
+    def _viewer_sort_key(self, value: str, column_index: int) -> tuple[int, object]:
+        text = value.strip()
+        if not text:
+            return (2, "")
+        try:
+            return (0, float(text))
+        except ValueError:
+            pass
+
+        header = self._viewer_header_row[column_index].strip().lower() if column_index < len(self._viewer_header_row) else ""
+        if "time" in header:
+            try:
+                clean = text.replace(" EST", "").replace(" CST", "").replace(" MST", "").replace(" PST", "")
+                return (1, datetime.datetime.strptime(clean, "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                return (1, text.lower())
+
+        return (1, text.lower())
+
+    def _draw_viewer_range_graph(
+        self,
+        parent: ctk.CTkFrame,
+        rows: list[list[str]],
+        column_indices: list[int],
+        title: str,
+        x_label_mode: str = "compact",
+    ) -> None:
+        panel = ctk.CTkFrame(parent, corner_radius=10, fg_color=("#F8FAFC", "#0B1220"))
+        panel.pack(fill="both", expand=True, padx=10, pady=10)
+
+        header_row = ctk.CTkFrame(panel, fg_color="transparent")
+        header_row.pack(fill="x", padx=12, pady=(10, 4))
+        header_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header_row, text=title, font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, sticky="w")
+
+        clear_pinned_button = ctk.CTkButton(
+            header_row,
+            text="Clear Pinned",
+            width=110,
+            height=28,
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+            command=lambda: None,
+        )
+        clear_pinned_button.grid(row=0, column=1, sticky="e")
+
+        canvas = tk.Canvas(panel, height=230, bg="#FFFFFF", highlightthickness=0)
+        canvas.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        # Build statistics per channel (column): low / average / high across the event.
+        channel_stats: list[tuple[int, str, float, float, float]] = []
+        all_points: list[tuple[float, int, int]] = []  # value, row_idx, col_idx
+        for col_idx in column_indices:
+            values: list[tuple[float, int]] = []
+            for row_idx, row in enumerate(rows):
+                if col_idx >= len(row):
+                    continue
+                try:
+                    v = float(row[col_idx])
+                except ValueError:
+                    continue
+                values.append((v, row_idx))
+                all_points.append((v, row_idx, col_idx))
+            if values:
+                only_vals = [v for v, _ in values]
+                header = self._viewer_header_row[col_idx].strip() if col_idx < len(self._viewer_header_row) else f"Col {col_idx + 1}"
+                channel_stats.append((col_idx, header, min(only_vals), sum(only_vals) / len(only_vals), max(only_vals)))
+
+        if not channel_stats:
+            ctk.CTkLabel(panel, text="No numeric data available for this event.", text_color=("#64748B", "#94A3B8")).pack(anchor="w", padx=12, pady=(0, 10))
+            return
+
+        # Stats labels
+        max_val, max_row, max_col = max(all_points, key=lambda t: t[0])
+        min_val, min_row, min_col = min(all_points, key=lambda t: t[0])
+        max_name = self._viewer_header_row[max_col] if max_col < len(self._viewer_header_row) else f"Col {max_col + 1}"
+        min_name = self._viewer_header_row[min_col] if min_col < len(self._viewer_header_row) else f"Col {min_col + 1}"
+        ctk.CTkLabel(
+            panel,
+            text=(
+                f"High: {max_val:.4f} ({max_name}, sample {max_row + 1})   "
+                f"Low: {min_val:.4f} ({min_name}, sample {min_row + 1})"
+            ),
+            text_color=("#334155", "#94A3B8"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        def _draw(_event: object | None = None) -> None:
+            canvas.delete("all")
+            width = max(canvas.winfo_width(), 320)
+            height = max(canvas.winfo_height(), 230)
+            left, right = 56, width - 20
+            top, bottom = 16, height - 50
+            canvas.create_rectangle(left, top, right, bottom, outline="#CBD5E1", width=1)
+
+            # Symmetric axis around 0 so the zero baseline is true center reference.
+            # Range = +/- (max absolute value * 1.05)
+            raw_min = min(lo for _, _, lo, _, _ in channel_stats)
+            raw_max = max(hi for _, _, _, _, hi in channel_stats)
+            max_abs = max(abs(raw_min), abs(raw_max))
+            if max_abs <= 1e-9:
+                max_abs = 1.0
+            y_extent = max_abs * 1.05
+            y_min = -y_extent
+            y_max = y_extent
+
+            def x_for(i: int) -> float:
+                if len(channel_stats) == 1:
+                    return (left + right) / 2
+                return left + (right - left) * (i / (len(channel_stats) - 1))
+
+            def y_for(v: float) -> float:
+                return bottom - ((v - y_min) / (y_max - y_min)) * (bottom - top)
+
+            # Draw denser Y-axis ticks + grid for better readability.
+            # Odd tick count keeps 0.00 as the middle labeled tick.
+            # Doubled again from 13 to 25 for even higher vertical resolution.
+            tick_count = 25
+            for ti in range(tick_count):
+                frac = ti / (tick_count - 1)
+                y_tick = bottom - frac * (bottom - top)
+                tick_val = y_min + frac * (y_max - y_min)
+                if abs(tick_val) < 1e-12:
+                    tick_val = 0.0
+                canvas.create_line(left, y_tick, right, y_tick, fill="#E2E8F0", width=1)
+                is_zero_tick = abs(tick_val) < 1e-12
+                canvas.create_text(
+                    10,
+                    y_tick,
+                    text=f"{tick_val:.4f}",
+                    anchor="w",
+                    fill="#111111" if is_zero_tick else "#475569",
+                    font=("Calibri", 9, "bold"),
+                )
+
+            # Draw solid zero baseline like a standard XY graph.
+            zero_y = y_for(0.0)
+            if top <= zero_y <= bottom:
+                canvas.create_line(left, zero_y, right, zero_y, fill="#111111", width=2)
+
+            hi_coords: list[float] = []
+            lo_coords: list[float] = []
+            avg_coords: list[float] = []
+            point_specs: list[tuple[float, float, str, str]] = []
+            for i, (_, _name, lo, avg, hi) in enumerate(channel_stats):
+                x = x_for(i)
+                y_lo = y_for(lo)
+                y_hi = y_for(hi)
+                y_avg = y_for(avg)
+                # vertical whisker low-high per channel
+                canvas.create_line(x, y_lo, x, y_hi, fill="#94A3B8", width=1)
+                hi_coords.extend([x, y_hi])
+                lo_coords.extend([x, y_lo])
+                avg_coords.extend([x, y_avg])
+
+            if len(hi_coords) >= 4:
+                canvas.create_line(*hi_coords, fill="#DC2626", width=2)
+            if len(lo_coords) >= 4:
+                canvas.create_line(*lo_coords, fill="#2563EB", width=2)
+            if len(avg_coords) >= 4:
+                canvas.create_line(*avg_coords, fill="#0F766E", width=2)
+
+            # X labels: compact channel names (S# / Ax#...) or just sensor number.
+            def _compact_channel(name: str) -> str:
+                n = name.strip().lower().replace(" ", "")
+                if n.startswith("strain"):
+                    suffix = "1"
+                    if "_" in n:
+                        tail = n.rsplit("_", 1)[-1]
+                        if tail.isdigit():
+                            suffix = tail
+                    return f"S{suffix}"
+                if n.startswith("accelx"):
+                    suffix = "1"
+                    if "_" in n:
+                        tail = n.rsplit("_", 1)[-1]
+                        if tail.isdigit():
+                            suffix = tail
+                    return f"Ax{suffix}"
+                if n.startswith("accely"):
+                    suffix = "1"
+                    if "_" in n:
+                        tail = n.rsplit("_", 1)[-1]
+                        if tail.isdigit():
+                            suffix = tail
+                    return f"Ay{suffix}"
+                if n.startswith("accelz"):
+                    suffix = "1"
+                    if "_" in n:
+                        tail = n.rsplit("_", 1)[-1]
+                        if tail.isdigit():
+                            suffix = tail
+                    return f"Az{suffix}"
+                return name.replace(" ", "")
+
+            def _number_only(name: str) -> str:
+                n = name.strip().lower().replace(" ", "")
+                if "_" in n:
+                    tail = n.rsplit("_", 1)[-1]
+                    if tail.isdigit():
+                        return tail
+                return "1"
+
+            for i, (_col_idx, name, _lo, _avg, _hi) in enumerate(channel_stats):
+                x = x_for(i)
+                label = _number_only(name) if x_label_mode == "number" else _compact_channel(name)
+                canvas.create_text(x, height - 6, text=label, anchor="s", fill="#475569", font=("Calibri", 9))
+
+            # Collect interactive scatter points for exact coordinate lookup.
+            for i, (_col_idx, name, lo, avg, hi) in enumerate(channel_stats):
+                x = x_for(i)
+                x_label = _number_only(name) if x_label_mode == "number" else _compact_channel(name)
+                point_specs.append((x, y_for(hi), f"x={x_label}, y={hi:.6f}", "#DC2626"))
+                point_specs.append((x, y_for(avg), f"x={x_label}, y={avg:.6f}", "#0F766E"))
+                point_specs.append((x, y_for(lo), f"x={x_label}, y={lo:.6f}", "#2563EB"))
+
+            hover_tooltip_ids: list[int] = []
+            pinned_tooltips: dict[tuple[float, float, str], list[int]] = {}
+
+            def _find_nearest_point(mx: float, my: float, max_px: float = 10.0) -> tuple[float, float, str] | None:
+                best: tuple[float, float, str] | None = None
+                best_d2 = max_px * max_px
+                for px, py, ptext, _color in point_specs:
+                    d2 = (mx - px) * (mx - px) + (my - py) * (my - py)
+                    if d2 <= best_d2:
+                        best = (px, py, ptext)
+                        best_d2 = d2
+                return best
+
+            def _hide_hover_tooltip() -> None:
+                for item in list(hover_tooltip_ids):
+                    try:
+                        canvas.delete(item)
+                    except tk.TclError:
+                        pass
+                hover_tooltip_ids.clear()
+
+            def _draw_tooltip(px: float, py: float, text: str, fill: str = "#FEF9C3", outline: str = "#F59E0B") -> list[int]:
+                try:
+                    tx = min(max(px + 8, left + 4), right - 4)
+                    ty = max(py - 12, top + 4)
+                    text_id = canvas.create_text(tx, ty, text=text, anchor="sw", fill="#0F172A", font=("Calibri", 10, "bold"))
+                    bbox = canvas.bbox(text_id)
+                    if bbox is None:
+                        return []
+                    x1, y1, x2, y2 = bbox
+                    bg_id = canvas.create_rectangle(x1 - 6, y1 - 4, x2 + 6, y2 + 4, fill=fill, outline=outline, width=1)
+                    canvas.tag_raise(text_id, bg_id)
+                    return [bg_id, text_id]
+                except tk.TclError:
+                    return []
+
+            for px, py, _ptext, color in point_specs:
+                canvas.create_oval(px - 3, py - 3, px + 3, py + 3, fill=color, outline="", width=0)
+
+            def _on_motion(event: object) -> None:
+                try:
+                    ex = float(getattr(event, "x", 0))
+                    ey = float(getattr(event, "y", 0))
+                    nearest = _find_nearest_point(ex, ey)
+                    if nearest is None:
+                        _hide_hover_tooltip()
+                        return
+                    px, py, ptext = nearest
+                    _hide_hover_tooltip()
+                    hover_tooltip_ids.extend(_draw_tooltip(px, py, ptext))
+                except Exception:
+                    pass
+
+            def _on_click(event: object) -> str:
+                try:
+                    ex = float(getattr(event, "x", 0))
+                    ey = float(getattr(event, "y", 0))
+                    nearest = _find_nearest_point(ex, ey)
+                    if nearest is None:
+                        _hide_hover_tooltip()
+                        return "break"
+                    px, py, ptext = nearest
+                    key = (px, py, ptext)
+                    if key in pinned_tooltips:
+                        for item in pinned_tooltips[key]:
+                            try:
+                                canvas.delete(item)
+                            except tk.TclError:
+                                pass
+                        pinned_tooltips.pop(key, None)
+                    else:
+                        ids = _draw_tooltip(px, py, ptext, fill="#DBEAFE", outline="#1D4ED8")
+                        if ids:
+                            pinned_tooltips[key] = ids
+                    return "break"
+                except Exception:
+                    pass
+                    return "break"
+
+            def _on_leave(_event: object) -> None:
+                try:
+                    _hide_hover_tooltip()
+                except Exception:
+                    pass
+
+            def _clear_all_pins() -> None:
+                try:
+                    for ids in list(pinned_tooltips.values()):
+                        for item in ids:
+                            try:
+                                canvas.delete(item)
+                            except tk.TclError:
+                                pass
+                    pinned_tooltips.clear()
+                    _hide_hover_tooltip()
+                except Exception:
+                    pass
+
+            clear_pinned_button.configure(command=_clear_all_pins)
+
+            canvas.bind("<Motion>", _on_motion)
+            canvas.bind("<Button-1>", _on_click)
+            canvas.bind("<Leave>", _on_leave)
+
+        canvas.bind("<Configure>", _draw)
+        _draw()
+
+    def _show_viewer_event_detail(self, row_index: int) -> None:
+        rows = self._viewer_filtered_rows if self._viewer_filtered_rows else self._viewer_sheet_rows
+        if row_index < 0 or row_index >= len(rows):
+            return
+
+        event_col = next((i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == "event #"), None)
+        time_col = next((i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == "time stamp"), None)
+        strain_cols = [i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == "strain" or h.strip().lower().startswith("strain_")]
+        accel_cols = [i for i, h in enumerate(self._viewer_header_row) if h.strip().lower().startswith("accel")]
+
+        def _accel_axis_groups() -> dict[str, list[int]]:
+            groups: dict[str, list[tuple[int, int]]] = {"x": [], "y": [], "z": []}
+            for col_idx in accel_cols:
+                if col_idx >= len(self._viewer_header_row):
+                    continue
+                header = self._viewer_header_row[col_idx].strip().lower().replace(" ", "")
+                axis = ""
+                if "accelx" in header or "accel_x" in header:
+                    axis = "x"
+                elif "accely" in header or "accel_y" in header:
+                    axis = "y"
+                elif "accelz" in header or "accel_z" in header:
+                    axis = "z"
+                if not axis:
+                    continue
+                sensor_num = 1
+                if "_" in header:
+                    tail = header.rsplit("_", 1)[-1]
+                    if tail.isdigit():
+                        sensor_num = int(tail)
+                groups[axis].append((sensor_num, col_idx))
+            return {axis: [c for _, c in sorted(vals, key=lambda t: t[0])] for axis, vals in groups.items()}
+
+        selected_row = rows[row_index]
+        selected_event = None
+        if event_col is not None and event_col < len(selected_row):
+            raw = selected_row[event_col].strip()
+            if raw:
+                try:
+                    selected_event = int(float(raw))
+                except ValueError:
+                    selected_event = raw
+
+        if selected_event is None:
+            event_rows = [selected_row]
+            event_title = "Selected Sample"
+        else:
+            event_rows = []
+            for row in rows:
+                if event_col is None or event_col >= len(row):
+                    continue
+                raw = row[event_col].strip()
+                try:
+                    value: object = int(float(raw))
+                except ValueError:
+                    value = raw
+                if value == selected_event:
+                    event_rows.append(row)
+            event_title = f"Event # {selected_event}"
+
+        start_time = "-"
+        end_time = "-"
+        if time_col is not None and event_rows:
+            stamps = [r[time_col] for r in event_rows if time_col < len(r) and r[time_col].strip() and r[time_col].strip().lower() != "time not set"]
+            if stamps:
+                start_time = stamps[0]
+                end_time = stamps[-1]
+
+        if self._viewer_detail_window is not None:
+            try:
+                self._viewer_detail_window.destroy()
+            except Exception:
+                pass
+
+        win = ctk.CTkToplevel(self.root)
+        win.title(f"{event_title} Analysis")
+        win.geometry("980x700")
+        win.minsize(860, 620)
+        win.grab_set()
+        self._viewer_detail_window = win
+
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(win, text=f"{event_title} Analysis", font=ctk.CTkFont(size=18, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=16, pady=(14, 4)
+        )
+        ctk.CTkLabel(
+            win,
+            text=f"Samples: {len(event_rows)} | Time: {start_time} -> {end_time}",
+            text_color=("#475569", "#94A3B8"),
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, sticky="e", padx=16, pady=(14, 4))
+
+        tabs = ctk.CTkTabview(win)
+        tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(8, 12))
+
+        tab_strain = tabs.add("Strain")
+        tab_accel = tabs.add("Acceleration")
+        tab_dump = tabs.add("Data Dump")
+
+        if strain_cols:
+            self._draw_viewer_range_graph(tab_strain, event_rows, strain_cols, "Strain Envelope by Channel", x_label_mode="number")
+        else:
+            ctk.CTkLabel(tab_strain, text="No strain columns in this workbook.").pack(anchor="w", padx=10, pady=10)
+
+        if accel_cols:
+            axis_groups = _accel_axis_groups()
+            accel_tabs = ctk.CTkTabview(tab_accel)
+            accel_tabs.pack(fill="both", expand=True, padx=6, pady=0)
+            tab_x = accel_tabs.add("X")
+            tab_y = accel_tabs.add("Y")
+            tab_z = accel_tabs.add("Z")
+
+            if axis_groups["x"]:
+                self._draw_viewer_range_graph(tab_x, event_rows, axis_groups["x"], "Acceleration X by Sensor", x_label_mode="number")
+            else:
+                ctk.CTkLabel(tab_x, text="No Accel X columns in this workbook.").pack(anchor="w", padx=10, pady=10)
+
+            if axis_groups["y"]:
+                self._draw_viewer_range_graph(tab_y, event_rows, axis_groups["y"], "Acceleration Y by Sensor", x_label_mode="number")
+            else:
+                ctk.CTkLabel(tab_y, text="No Accel Y columns in this workbook.").pack(anchor="w", padx=10, pady=10)
+
+            if axis_groups["z"]:
+                self._draw_viewer_range_graph(tab_z, event_rows, axis_groups["z"], "Acceleration Z by Sensor", x_label_mode="number")
+            else:
+                ctk.CTkLabel(tab_z, text="No Accel Z columns in this workbook.").pack(anchor="w", padx=10, pady=10)
+        else:
+            ctk.CTkLabel(tab_accel, text="No acceleration columns in this workbook.").pack(anchor="w", padx=10, pady=10)
+
+        dump = ctk.CTkTextbox(tab_dump, wrap="none")
+        dump.pack(fill="both", expand=True, padx=10, pady=10)
+        headers = [h.strip() if h.strip() else f"Column {i + 1}" for i, h in enumerate(self._viewer_header_row)]
+        lines = [",".join(headers)]
+        for row in event_rows:
+            normalized = [row[i] if i < len(row) else "" for i in range(len(headers))]
+            lines.append(",".join(normalized))
+        dump.insert("1.0", "\n".join(lines))
+        dump.configure(state="disabled")
+
+    def _on_viewer_row_double_click(self, event: object) -> None:
+        if self.viewer_sheet is None:
+            return
+        selected = self.viewer_sheet.get_currently_selected()
+        if not selected:
+            return
+        rows = self._viewer_filtered_rows or self._viewer_sheet_rows
+        if not rows:
+            return
+        row_idx = getattr(selected, "row", None)
+        if row_idx is None and isinstance(selected, tuple) and len(selected) >= 1:
+            row_idx = selected[0]
+        if row_idx is None or not isinstance(row_idx, int) or row_idx < 0 or row_idx >= len(rows):
+            return
+        self._show_viewer_event_detail(row_idx)
+
+    def _on_viewer_header_click(self, column_index: int) -> None:
+        if column_index < 0:
+            return
+        if self._viewer_sort_column == column_index:
+            self._viewer_sort_descending = not self._viewer_sort_descending
+        else:
+            self._viewer_sort_column = column_index
+            self._viewer_sort_descending = False
+        self._viewer_sheet_rows.sort(
+            key=lambda row: self._viewer_sort_key(row[column_index] if column_index < len(row) else "", column_index),
+            reverse=self._viewer_sort_descending,
+        )
+        self._apply_viewer_filter()
+
+    def _viewer_default_open_dir(self) -> Path:
+        if self._viewer_workbook_path is not None:
+            return self._viewer_workbook_path.parent
+        return _default_data_path()
+
+    def _refresh_data_viewer(self) -> None:
+        if self.viewer_source_label is not None:
+            if self._viewer_workbook_path is not None:
+                self.viewer_source_label.configure(text=f"Workbook: {self._viewer_workbook_path}")
+            else:
+                self.viewer_source_label.configure(text="Workbook: None selected")
+        if self._viewer_workbook_path is None:
+            self._set_viewer_status("Open a workbook from the AppData data folder to start browsing offload workbooks.")
+            self._update_viewer_column_window_label(0)
+            return
+        if self._viewer_workbook_path.exists():
+            self._load_viewer_workbook()
+        else:
+            missing_name = self._viewer_workbook_path.name
+            self._clear_viewer_selection()
+            self._set_viewer_status(f"Previously selected workbook '{missing_name}' is no longer available.")
+
+    def _open_viewer_workbook_picker(self) -> None:
+        initial_dir = self._viewer_default_open_dir()
+        try:
+            initial_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        selected = filedialog.askopenfilename(
+            title="Open Offload Workbook",
+            initialdir=str(initial_dir),
+            filetypes=[("Excel Workbook", "*.xlsx"), ("All Files", "*.*")],
+        )
+        if not selected:
+            return
+
+        self._viewer_workbook_path = Path(selected)
+        self._load_viewer_workbook()
+
+    def _clear_viewer_selection(self) -> None:
+        self._viewer_workbook_path = None
+        self._viewer_col_start = 0
+        self._viewer_sort_column = None
+        self._viewer_sort_descending = False
+        self._viewer_strain_low_thresh = 0.0
+        self._viewer_strain_high_thresh = 0.0
+        self._viewer_max_strain_row_idx = -1
+        self._viewer_max_accel_row_idx = -1
+        self._viewer_max_strain_col_idx = -1
+        self._viewer_max_accel_col_idx = -1
+        self.viewer_sheet_var.set("No sheets")
+        self._viewer_sheet_rows = []
+        self._viewer_filtered_rows = []
+        self._viewer_header_row = []
+        self._populate_viewer_tree([])
+        self._set_viewer_grid_visible(False)
+        self._set_viewer_stats_visible(False)
+        if self._viewer_detail_window is not None:
+            try:
+                self._viewer_detail_window.destroy()
+            except Exception:
+                pass
+            self._viewer_detail_window = None
+        if self.viewer_source_label is not None:
+            self.viewer_source_label.configure(text="Workbook: None selected")
+        if self.viewer_path_label is not None:
+            self.viewer_path_label.configure(text="Selected Offload Workbook")
+        if self.viewer_meta_label is not None:
+            self.viewer_meta_label.configure(text="Truck metadata will appear here.")
+        if self.viewer_sheet_info_label is not None:
+            self.viewer_sheet_info_label.configure(text="Offload Rows: 0 | Total Columns: 0")
+        self._update_viewer_column_window_label(0)
+        self._set_viewer_status("Open a workbook to inspect combined offload data.")
+
+    def _load_viewer_workbook(self) -> None:
+        workbook_path = self._viewer_workbook_path
+        if workbook_path is None:
+            self.viewer_sheet_var.set("No sheets")
+            self._viewer_sheet_rows = []
+            self._populate_viewer_tree([])
+            if self.viewer_path_label is not None:
+                self.viewer_path_label.configure(text="Selected Offload Workbook")
+            if self.viewer_meta_label is not None:
+                self.viewer_meta_label.configure(text="Truck metadata will appear here.")
+            if self.viewer_sheet_info_label is not None:
+                self.viewer_sheet_info_label.configure(text="Offload Rows: 0 | Total Columns: 0")
+            self._set_viewer_grid_visible(False)
+            self._set_viewer_stats_visible(False)
+            return
+
+        if not workbook_path.exists():
+            self._clear_viewer_selection()
+            self._set_viewer_status("Selected workbook could not be found.")
+            return
+
+        try:
+            from openpyxl import load_workbook
+            workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+            sheet_names = list(workbook.sheetnames)
+            workbook.close()
+        except Exception as exc:
+            self._set_viewer_status(f"Could not open workbook: {exc}")
+            return
+
+        current_sheet = self.viewer_sheet_var.get().strip()
+        if sheet_names:
+            if current_sheet not in sheet_names:
+                current_sheet = sheet_names[0]
+            self.viewer_sheet_var.set(current_sheet)
+            self._load_viewer_sheet_data()
+        else:
+            self.viewer_sheet_var.set("No sheets")
+            self._viewer_sheet_rows = []
+            self._populate_viewer_tree([])
+
+    def _load_viewer_sheet_data(self) -> None:
+        workbook_path = self._viewer_workbook_path
+        sheet_name = self.viewer_sheet_var.get().strip()
+        if workbook_path is None or not sheet_name or sheet_name == "No sheets":
+            self._viewer_sheet_rows = []
+            self._populate_viewer_tree([])
+            return
+
+        try:
+            from openpyxl import load_workbook
+            workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+            if sheet_name not in workbook.sheetnames:
+                workbook.close()
+                self._set_viewer_status("Selected sheet no longer exists in this workbook.")
+                return
+            worksheet = workbook[sheet_name]
+            rows: list[list[str]] = []
+            max_cols = 0
+            for row in worksheet.iter_rows(values_only=True):
+                values = ["" if value is None else str(value) for value in row]
+                max_cols = max(max_cols, len(values))
+                rows.append(values)
+            workbook.close()
+        except Exception as exc:
+            self._set_viewer_status(f"Could not load sheet data: {exc}")
+            return
+
+        normalized_rows = [row + [""] * (max_cols - len(row)) for row in rows]
+        if len(normalized_rows) >= 4:
+            self._viewer_header_row = list(normalized_rows[3])
+            self._viewer_sheet_rows = normalized_rows[4:]
+        else:
+            self._viewer_header_row = [f"Column {idx + 1}" for idx in range(max_cols)]
+            self._viewer_sheet_rows = normalized_rows
+        self._viewer_col_start = 0
+        self._apply_viewer_filter()
+        self._set_viewer_grid_visible(bool(self._viewer_sheet_rows))
+
+        if self.viewer_source_label is not None:
+            self.viewer_source_label.configure(text=f"Workbook: {workbook_path}")
+        if self.viewer_path_label is not None:
+            session_name = workbook_path.parent.name
+            truck_name = workbook_path.parent.parent.name if workbook_path.parent.parent != workbook_path.parent else "Unknown"
+            self.viewer_path_label.configure(text=f"Offload Session: {truck_name} / {session_name}")
+        truck_meta = normalized_rows[0][1] if len(normalized_rows) > 0 and len(normalized_rows[0]) > 1 else "Unknown"
+        desc_meta = normalized_rows[1][1] if len(normalized_rows) > 1 and len(normalized_rows[1]) > 1 else ""
+        if self.viewer_meta_label is not None:
+            self.viewer_meta_label.configure(
+                text=f"Truck ID: {truck_meta} | Description: {desc_meta or '-'}"
+            )
+        data_rows = len(self._viewer_sheet_rows)
+        if self.viewer_sheet_info_label is not None:
+            self.viewer_sheet_info_label.configure(text=f"Offload Rows: {data_rows} | Total Columns: {max_cols}")
+        self._set_viewer_status(f"Viewing sheet '{sheet_name}' from {workbook_path.name}.")
+
+    def _apply_viewer_filter(self) -> None:
+        self._viewer_filtered_rows = list(self._viewer_sheet_rows)
+        self._populate_viewer_tree(self._viewer_filtered_rows)
+        self._update_viewer_stats(self._viewer_filtered_rows)
+        self._set_viewer_status(f"Rows shown: {len(self._viewer_filtered_rows)}")
+
+    def _update_viewer_stats(self, rows: list[list[str]]) -> None:
+        if not self.viewer_kpi_labels:
+            return
+        if not rows or not self._viewer_header_row:
+            for lbl in self.viewer_kpi_labels.values():
+                lbl.configure(text="—")
+            self._set_viewer_stats_visible(False)
+            return
+
+        def _col(name: str) -> int | None:
+            return next((i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == name.lower()), None)
+
+        event_col = _col("Event #")
+        temp_col = _col("Temp")
+        time_col = _col("Time Stamp")
+
+        # Collect all strain column indices (Strain, Strain_2, Strain_3, ...)
+        strain_cols = [i for i, h in enumerate(self._viewer_header_row)
+                       if h.strip().lower() == "strain" or h.strip().lower().startswith("strain_")]
+        # Collect all accel column indices
+        accel_cols = [i for i, h in enumerate(self._viewer_header_row)
+                      if h.strip().lower().startswith("accel")]
+
+        # Events
+        if event_col is not None:
+            event_nums = set()
+            for row in rows:
+                if event_col < len(row) and row[event_col].strip():
+                    try:
+                        event_nums.add(int(float(row[event_col])))
+                    except ValueError:
+                        pass
+            self.viewer_kpi_labels["Events"].configure(text=str(len(event_nums)))
+        else:
+            self.viewer_kpi_labels["Events"].configure(text=str(len(rows)))
+
+        # Max |Strain| across all strain columns
+        max_strain = 0.0
+        self._viewer_max_strain_row_idx = -1
+        self._viewer_max_strain_col_idx = -1
+        for row_i, row in enumerate(rows):
+            for ci in strain_cols:
+                if ci < len(row):
+                    try:
+                        v = abs(float(row[ci]))
+                        if v > max_strain:
+                            max_strain = v
+                            self._viewer_max_strain_row_idx = row_i
+                            self._viewer_max_strain_col_idx = ci
+                    except ValueError:
+                        pass
+        self.viewer_kpi_labels["Max |Strain|"].configure(
+            text=f"{max_strain:.3f}" if strain_cols else "—"
+        )
+
+        # Max Accel value from actual accel cells (ensures KPI jump lands on a real cell)
+        max_accel_mag = 0.0
+        self._viewer_max_accel_row_idx = -1
+        self._viewer_max_accel_col_idx = -1
+        for row_i, row in enumerate(rows):
+            for col_i in accel_cols:
+                if col_i >= len(row):
+                    continue
+                try:
+                    comp_abs = abs(float(row[col_i]))
+                except ValueError:
+                    continue
+                if comp_abs > max_accel_mag:
+                    max_accel_mag = comp_abs
+                    self._viewer_max_accel_row_idx = row_i
+                    self._viewer_max_accel_col_idx = col_i
+        self.viewer_kpi_labels["Max Accel Mag"].configure(
+            text=f"{max_accel_mag:.3f} g" if accel_cols else "—"
+        )
+
+        # Avg Temp
+        if temp_col is not None:
+            temps = []
+            for row in rows:
+                if temp_col < len(row):
+                    try:
+                        temps.append(float(row[temp_col]))
+                    except ValueError:
+                        pass
+            self.viewer_kpi_labels["Avg Temp (°F)"].configure(
+                text=f"{sum(temps)/len(temps):.1f} °F" if temps else "—"
+            )
+        else:
+            self.viewer_kpi_labels["Avg Temp (°F)"].configure(text="—")
+
+        # Avg RH
+        rh_col = _col("RH")
+        if rh_col is not None:
+            rh_vals = []
+            for row in rows:
+                if rh_col < len(row):
+                    try:
+                        rh_vals.append(float(row[rh_col]))
+                    except ValueError:
+                        pass
+            self.viewer_kpi_labels["Avg RH (%)"].configure(
+                text=f"{sum(rh_vals)/len(rh_vals):.1f} %" if rh_vals else "—"
+            )
+        else:
+            self.viewer_kpi_labels["Avg RH (%)"].configure(text="—")
+
+        # Date Range
+        if time_col is not None:
+            dates = []
+            for row in rows:
+                if time_col < len(row):
+                    val = row[time_col].strip()
+                    if val and val.lower() != "time not set":
+                        try:
+                            clean = val.split()[0]  # just date portion
+                            dates.append(clean)
+                        except Exception:
+                            pass
+            if dates:
+                dates_sorted = sorted(set(dates))
+                if len(dates_sorted) == 1:
+                    self.viewer_kpi_labels["Date Range"].configure(text=dates_sorted[0])
+                else:
+                    self.viewer_kpi_labels["Date Range"].configure(text=f"{dates_sorted[0]} -> {dates_sorted[-1]}")
+            else:
+                self.viewer_kpi_labels["Date Range"].configure(text="—")
+        else:
+            self.viewer_kpi_labels["Date Range"].configure(text="—")
+
+        # Compute thresholds from max |strain| using fixed percentage bands:
+        # 0-33% green, 33-66% yellow, 66-100% red.
+        strain_magnitudes: list[float] = []
+        for row in rows:
+            for ci in strain_cols:
+                if ci < len(row):
+                    try:
+                        strain_magnitudes.append(abs(float(row[ci])))
+                    except ValueError:
+                        pass
+
+        if strain_magnitudes:
+            max_v = max(strain_magnitudes)
+            if max_v > 0:
+                self._viewer_strain_low_thresh = max_v * 0.33
+                self._viewer_strain_high_thresh = max_v * 0.66
+            else:
+                # All zero values: keep everything green.
+                self._viewer_strain_low_thresh = float("inf")
+                self._viewer_strain_high_thresh = float("inf")
+        else:
+            # No numeric strain values: keep everything green.
+            self._viewer_strain_low_thresh = float("inf")
+            self._viewer_strain_high_thresh = float("inf")
+
+        self._set_viewer_stats_visible(True)
+
+    def _jump_to_viewer_max(self, kpi_name: str) -> None:
+        if self.viewer_sheet is None:
+            return
+        rows = self._viewer_filtered_rows if self._viewer_filtered_rows else self._viewer_sheet_rows
+        if not rows:
+            return
+
+        if kpi_name == "Max |Strain|":
+            target_row_idx = self._viewer_max_strain_row_idx
+            target_col_idx = self._viewer_max_strain_col_idx
+        else:
+            target_row_idx = self._viewer_max_accel_row_idx
+            target_col_idx = self._viewer_max_accel_col_idx
+
+        if target_row_idx < 0:
+            return
+
+        if 0 <= target_col_idx < len(self._viewer_header_row):
+            self.viewer_sheet.see(target_row_idx, target_col_idx, redraw=False)
+            self.viewer_sheet.select_cell(target_row_idx, target_col_idx, redraw=True)
+        else:
+            self.viewer_sheet.see(target_row_idx, 0, redraw=False)
+            self.viewer_sheet.select_cell(target_row_idx, 0, redraw=True)
+
+        if 0 <= target_col_idx < len(self._viewer_header_row) and target_row_idx < len(rows) and target_col_idx < len(rows[target_row_idx]):
+            self._set_viewer_status(
+                f"Jumped to {kpi_name}: {self._viewer_header_row[target_col_idx]} = {rows[target_row_idx][target_col_idx]}"
+            )
+
+    def _populate_viewer_tree(self, rows: list[list[str]]) -> None:
+        if self.viewer_sheet is None:
+            return
+        max_cols = max(max((len(row) for row in rows), default=0), len(self._viewer_header_row))
+        if max_cols == 0:
+            self.viewer_sheet.headers([])
+            self.viewer_sheet.set_sheet_data([])
+            self._update_viewer_column_window_label(0)
+            self._set_viewer_grid_visible(False)
+            return
+
+        # tksheet displays full column set natively with true cell selection/highlighting.
+        normalized = [row + [""] * (max_cols - len(row)) for row in rows]
+        headers = [(self._viewer_header_row[i].strip() if i < len(self._viewer_header_row) else _excel_column_name(i)) for i in range(max_cols)]
+        self.viewer_sheet.headers(headers, redraw=False)
+        self.viewer_sheet.set_sheet_data(normalized, redraw=False, reset_highlights=True)
+
+        self.viewer_sheet.redraw()
+        self._update_viewer_column_window_label(max_cols)
+        self._set_viewer_grid_visible(True)
+
+    def _update_viewer_column_window_label(self, total_cols: int) -> None:
+        if self.viewer_col_window_label is None:
+            return
+        if total_cols <= 0:
+            self.viewer_col_window_label.configure(text="Columns: -")
+            return
+        self.viewer_col_window_label.configure(text=f"Columns: {total_cols}")
+
+    def _sync_viewer_column_label(self) -> None:
+        if self.viewer_col_window_label is None or self.viewer_sheet is None:
+            return
+        sel = self.viewer_sheet.get_currently_selected()
+        if not sel:
+            return
+        col_idx = getattr(sel, "column", None)
+        if col_idx is None and isinstance(sel, tuple) and len(sel) >= 2:
+            col_idx = sel[1]
+        if isinstance(col_idx, int) and 0 <= col_idx < len(self._viewer_header_row):
+            self.viewer_col_window_label.configure(text=f"Column: {self._viewer_header_row[col_idx]}")
+
+    def _on_viewer_xscroll(self, *args: str) -> None:
+        rows = self._viewer_filtered_rows if self._viewer_filtered_rows else self._viewer_sheet_rows
+        total_cols = max(max((len(row) for row in rows), default=0), len(self._viewer_header_row))
+        scrollable = self._viewer_scrollable_indices(total_cols)
+        if len(scrollable) <= self._viewer_col_span:
+            self._viewer_col_start = 0
+            self._populate_viewer_tree(rows)
+            return
+
+        max_start = max(0, len(scrollable) - self._viewer_col_span)
+        if not args:
+            return
+
+        if args[0] == "moveto" and len(args) > 1:
+            try:
+                fraction = float(args[1])
+            except ValueError:
+                return
+            self._viewer_col_start = int(round(fraction * max_start))
+        elif args[0] == "scroll" and len(args) > 2:
+            try:
+                step = int(args[1])
+            except ValueError:
+                return
+            page_size = max(1, self._viewer_col_span // 2)
+            delta = step * (1 if args[2] == "units" else page_size)
+            self._viewer_col_start = min(max(self._viewer_col_start + delta, 0), max_start)
+        else:
+            return
+
+        self._populate_viewer_tree(rows)
+
+    def _shift_viewer_columns(self, delta: int) -> None:
+        rows = self._viewer_filtered_rows if self._viewer_filtered_rows else self._viewer_sheet_rows
+        total_cols = max(max((len(row) for row in rows), default=0), len(self._viewer_header_row))
+        scrollable = self._viewer_scrollable_indices(total_cols)
+        if len(scrollable) <= self._viewer_col_span:
+            self._viewer_col_start = 0
+        else:
+            self._viewer_col_start = min(max(self._viewer_col_start + delta, 0), len(scrollable) - self._viewer_col_span)
+        self._populate_viewer_tree(rows)
+
+    def _open_selected_viewer_folder(self) -> None:
+        target = self._viewer_workbook_path
+        path_to_open = target.parent if target is not None else self._viewer_default_open_dir()
+        try:
+            path_to_open.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(str(path_to_open))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path_to_open)])
+            else:
+                subprocess.Popen(["xdg-open", str(path_to_open)])
+        except Exception as exc:
+            messagebox.showerror("Open Folder Error", str(exc))
+
+    def _open_viewer_default_folder(self) -> None:
+        path_to_open = _default_data_path()
+        try:
+            path_to_open.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(str(path_to_open))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path_to_open)])
+            else:
+                subprocess.Popen(["xdg-open", str(path_to_open)])
+        except Exception as exc:
+            messagebox.showerror("Open Folder Error", str(exc))
+
     def _set_theme(self, mode: str) -> None:
         ctk.set_appearance_mode(mode)
 
@@ -1332,6 +2595,7 @@ class MainWindow:
         self._offload_lora_row_buf = ""
         self._offload_saved_files = []
         self._offload_session_dir = None
+        self._offload_summary_file = None
         self._update_offload_status_display()
 
     def _get_offload_status_color(self) -> tuple[str, str]:
@@ -1513,8 +2777,11 @@ class MainWindow:
                 self.offload_in_progress = False
                 self.offload_status = "Complete"
                 saved_count = len(self._offload_saved_files)
-                save_note = f" \u2014 {saved_count} file(s) saved" if saved_count else ""
-                self.offload_last_status = f"Success ({total_dur:.1f}s, {self.offload_events_count} events){save_note}"
+                save_note = f" - {saved_count} file(s) saved" if saved_count else ""
+                workbook_note = self._ensure_session_excel_summary() if saved_count else ""
+                self.offload_last_status = (
+                    f"Success ({total_dur:.1f}s, {self.offload_events_count} events){save_note}{workbook_note}"
+                )
                 self._update_offload_status_display()
         # Wi-Fi timeout
         elif "RSP:WIFI_TX_TIMEOUT" in line or "WIFI_TX_TIMEOUT" in line:
@@ -1530,9 +2797,10 @@ class MainWindow:
                 saved_count = len(self._offload_saved_files)
                 if saved_count > 0:
                     self.offload_status = "Complete"
+                    workbook_note = self._ensure_session_excel_summary()
                     self.offload_last_status = (
                         f"Success without END:D ({total_dur:.1f}s, {self.offload_events_count} events)"
-                        f" — {saved_count} file(s) saved"
+                        f" - {saved_count} file(s) saved{workbook_note}"
                     )
                 else:
                     self.offload_status = "Timeout"
@@ -1556,11 +2824,13 @@ class MainWindow:
                         network = line.split("[WIFI_FAIL]")[-1].strip()
                     else:
                         network = line.split("RSP:WIFI_FAIL:")[-1].strip().rstrip("]")
-                    save_note = f" — {saved_count} file(s) saved" if saved_count else ""
-                    self.offload_last_status = f"Wi-Fi failed: {network}{save_note}"
+                    save_note = f" - {saved_count} file(s) saved" if saved_count else ""
+                    workbook_note = self._ensure_session_excel_summary() if saved_count else ""
+                    self.offload_last_status = f"Wi-Fi failed: {network}{save_note}{workbook_note}"
                 except:
-                    save_note = f" — {saved_count} file(s) saved" if saved_count else ""
-                    self.offload_last_status = f"Wi-Fi failed{save_note}"
+                    save_note = f" - {saved_count} file(s) saved" if saved_count else ""
+                    workbook_note = self._ensure_session_excel_summary() if saved_count else ""
+                    self.offload_last_status = f"Wi-Fi failed{save_note}{workbook_note}"
                 self._update_offload_status_display()
         # Wi-Fi transmission layer failed (TCP, no profiles, or exhausted attempts)
         elif "[WIFI_TX_FAIL]" in line or "RSP:WIFI_TX_FAIL" in line:
@@ -1580,16 +2850,25 @@ class MainWindow:
                         reason = line.split("[WIFI_TX_FAIL]")[-1].strip()
                     else:
                         reason = line.split("RSP:WIFI_TX_FAIL")[-1].strip()
-                    save_note = f" — {saved_count} file(s) saved" if saved_count else ""
-                    self.offload_last_status = f"{reason}{save_note}" if reason else f"Wi-Fi unavailable{save_note}"
+                    save_note = f" - {saved_count} file(s) saved" if saved_count else ""
+                    workbook_note = self._ensure_session_excel_summary() if saved_count else ""
+                    self.offload_last_status = (
+                        f"{reason}{save_note}{workbook_note}" if reason else f"Wi-Fi unavailable{save_note}{workbook_note}"
+                    )
                 except:
-                    save_note = f" — {saved_count} file(s) saved" if saved_count else ""
-                    self.offload_last_status = f"Wi-Fi unavailable{save_note}"
+                    save_note = f" - {saved_count} file(s) saved" if saved_count else ""
+                    workbook_note = self._ensure_session_excel_summary() if saved_count else ""
+                    self.offload_last_status = f"Wi-Fi unavailable{save_note}{workbook_note}"
                 self._update_offload_status_display()
         # Fallback to LoRa
         elif "RSP:WIFI_FALLBACK_LORA" in line or "WIFI_FALLBACK_LORA" in line:
             self.offload_status = "Fallback LoRa"
             self.offload_last_status = "Switched to LoRa"
+        # Receiver confirms stored events were cleared after offload
+        elif "RSP:CLEAR_OK" in line or "CLEAR_OK" in line:
+            if "Receiver cleared" not in self.offload_last_status:
+                self.offload_last_status = f"{self.offload_last_status} | Receiver cleared"
+            self._update_offload_status_display()
         # No data to transfer
         elif "RSP:NO_DATA" in line or "NO_DATA" in line:
             if self.offload_in_progress:
@@ -1601,8 +2880,9 @@ class MainWindow:
                 self.offload_in_progress = False
                 self.offload_status = "No Data"
                 saved_count = len(self._offload_saved_files)
-                save_note = f" — {saved_count} file(s) saved" if saved_count else ""
-                self.offload_last_status = f"No events to transfer ({total_dur:.1f}s){save_note}"
+                save_note = f" - {saved_count} file(s) saved" if saved_count else ""
+                workbook_note = self._ensure_session_excel_summary() if saved_count else ""
+                self.offload_last_status = f"No events to transfer ({total_dur:.1f}s){save_note}{workbook_note}"
                 self._update_offload_status_display()
 
     def _get_selected_setup_mask(self) -> int:
@@ -2070,6 +3350,7 @@ class MainWindow:
         if folder:
             self.data_path_var.set(folder)
             self._save_app_settings()
+            self._refresh_data_viewer()
     
     def _open_data_folder(self) -> None:
         """Open the current data folder in file explorer."""
@@ -2140,6 +3421,137 @@ class MainWindow:
         except Exception as exc:
             # Defer log call to avoid re-entering _process_offload_message
             self.root.after(0, lambda msg=f"[SAVE_ERR] {name}: {exc}": self._append_log(msg))
+
+    def _parse_event_row(self, row: str) -> list[str]:
+        """Parse one event CSV row while preserving quoted timestamps and text fields."""
+        try:
+            parsed = next(csv.reader([row]))
+        except Exception:
+            parsed = row.split(",")
+        return [cell.strip() for cell in parsed]
+
+    def _coerce_excel_value(self, value: str) -> object:
+        """Convert numeric-looking CSV values to real Excel numbers."""
+        text = value.strip()
+        if not text:
+            return ""
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            return text
+
+    def _build_session_excel_summary(self) -> Path | None:
+        """Combine all saved event files in this offload session into one Excel workbook."""
+        if not self._offload_saved_files or self._offload_session_dir is None:
+            return None
+
+        try:
+            from openpyxl import Workbook
+        except Exception:
+            return None
+
+        rows_for_excel: list[tuple[int, list[str]]] = []
+        max_extra_cols = 0
+
+        for event_index, event_path in enumerate(self._offload_saved_files, start=1):
+            try:
+                text = event_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+            for raw in text.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                fields = self._parse_event_row(line)
+                if len(fields) < 8:
+                    fields.extend([""] * (8 - len(fields)))
+                extra = max(0, len(fields) - 8)
+                if extra > max_extra_cols:
+                    max_extra_cols = extra
+                rows_for_excel.append((event_index, fields))
+
+        if not rows_for_excel:
+            return None
+
+        headers = [
+            "Event #",
+            "Time Stamp",
+            "Temp",
+            "RH",
+            "Accelx",
+            "Accely",
+            "Accelz",
+            "Strain",
+        ]
+
+        sample_group_count = (max_extra_cols + 3) // 4
+        for sample_idx in range(2, sample_group_count + 2):
+            headers.extend([
+                f"Accelx_{sample_idx}",
+                f"Accely_{sample_idx}",
+                f"Accelz_{sample_idx}",
+                f"Strain_{sample_idx}",
+            ])
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Offload Data"
+
+        truck_id = self.truck_id_var.get().strip() or "Unknown"
+        truck_description = self.description_var.get().strip() or ""
+        ws.append(["Truck ID:", truck_id])
+        ws.append(["Truck Description:", truck_description])
+        ws.append([])
+        ws.append(headers)
+
+        for event_index, fields in rows_for_excel:
+            row_values: list[object] = [event_index]
+            padded_fields = fields + [""] * (8 + max_extra_cols - len(fields))
+            row_values.append(padded_fields[0])
+            row_values.extend(self._coerce_excel_value(value) for value in padded_fields[1 : 8 + max_extra_cols])
+            ws.append(row_values)
+
+        for col in ws.columns:
+            max_len = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                value = "" if cell.value is None else str(cell.value)
+                if len(value) > max_len:
+                    max_len = len(value)
+            ws.column_dimensions[col_letter].width = min(max(10, max_len + 2), 28)
+
+        out_path = self._offload_session_dir / "combined_offload.xlsx"
+        if out_path.exists():
+            idx = 2
+            while (self._offload_session_dir / f"combined_offload_{idx}.xlsx").exists():
+                idx += 1
+            out_path = self._offload_session_dir / f"combined_offload_{idx}.xlsx"
+
+        wb.save(out_path)
+        return out_path
+
+    def _ensure_session_excel_summary(self) -> str:
+        """Create the combined workbook once per offload session and return a status suffix."""
+        if self._offload_summary_file is not None:
+            return f" - workbook: {self._offload_summary_file.name}"
+
+        try:
+            out_path = self._build_session_excel_summary()
+        except Exception as exc:
+            self.root.after(0, lambda msg=f"[XLSX_ERR] {exc}": self._append_log(msg))
+            return ""
+
+        if out_path is None:
+            return ""
+
+        self._offload_summary_file = out_path
+        self.root.after(0, self._refresh_data_viewer)
+        return f" - workbook: {out_path.name}"
 
     def _send_unit_config(self) -> None:
         if not self._is_transmitter_connected():
