@@ -5,8 +5,8 @@
 
 #define SERIAL_BAUD_RATE      115200
 
-// EEPROM storage for Wi-Fi profiles (32 bytes per SSID + 64 bytes per password = 288 bytes total)
-#define EEPROM_SIZE 512
+// EEPROM storage for Wi-Fi profiles (MAX_WIFI_PROFILES * 100 bytes + headroom)
+#define EEPROM_SIZE 2048
 #define EEPROM_OFFSET_WIFI 0
 #define EEPROM_SSID_SIZE 32
 #define EEPROM_PASS_SIZE 64
@@ -27,18 +27,31 @@
 #define LORA_PREAMBLE_LEN     8
 
 #define SETUP_MASK_WIFI       (1 << 6)
+#define SETUP_ACK_TIMEOUT_MS  1500UL
+#define SETUP_ACK_RETRY_COUNT 4
 
 SX1262 loraRadio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY);
 volatile bool loraPacketReceived = false;
+volatile bool g_setupAckReceived = false;
 
 bool dataTransferActive = false;
 unsigned long dataTransferStartMs = 0;
 size_t dataTransferBytes = 0;
 size_t dataTransferLines = 0;
 
-#define MAX_WIFI_PROFILES 3
+#define MAX_WIFI_PROFILES 12
 String t_wifiSsids[MAX_WIFI_PROFILES];
 String t_wifiPasswords[MAX_WIFI_PROFILES];
+
+// Pre-connect state: set when receiver broadcasts RSP:WIFI_CONNECTED:<ssid> via LoRa.
+// This lets the transmitter start connecting immediately instead of waiting for RSP:WIFI_SERVER.
+String g_receiverConnectedSsid = "";
+bool   g_receiverWifiPreconnecting = false;
+
+#define WIFI_CONNECT_TIMEOUT_SEC 20
+#define WIFI_CONNECT_RETRY_COUNT 2
+#define WIFI_SCAN_WAIT_SEC 12
+#define WIFI_SCAN_POLL_SEC 2
 
 // Allow extra headroom for receiver SD/Wi-Fi jitter before declaring transfer timeout.
 #define WIFI_TCP_IDLE_TIMEOUT_MS 30000UL
@@ -49,6 +62,8 @@ String t_wifiPasswords[MAX_WIFI_PROFILES];
 void setLoRaFlag(void) {
   loraPacketReceived = true;
 }
+
+void processLoRaPackets();
 
 void restartLoRaReceive() {
   int rxState = loraRadio.startReceive();
@@ -82,6 +97,30 @@ bool sendLoRaCommand(char command) {
     dataTransferLines = 0;
   }
   return true;
+}
+
+bool sendSetupPacketWithAck(const String& packet) {
+  for (int attempt = 1; attempt <= SETUP_ACK_RETRY_COUNT; attempt++) {
+    g_setupAckReceived = false;
+
+    if (!sendLoRaPacket(packet)) {
+      Serial.printf("[SETUP_RETRY] TX failed attempt %d/%d\n", attempt, SETUP_ACK_RETRY_COUNT);
+      continue;
+    }
+
+    unsigned long startMs = millis();
+    while ((millis() - startMs) < SETUP_ACK_TIMEOUT_MS) {
+      processLoRaPackets();
+      if (g_setupAckReceived) {
+        return true;
+      }
+      delay(10);
+    }
+
+    Serial.printf("[SETUP_RETRY] No ACK attempt %d/%d\n", attempt, SETUP_ACK_RETRY_COUNT);
+  }
+
+  return false;
 }
 
 void saveWiFiProfilesToEEPROM() {
@@ -137,9 +176,171 @@ void loadWiFiProfilesFromEEPROM() {
   }
 }
 
+static const char* wifiStatusToText(wl_status_t status) {
+  switch (status) {
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_NO_SSID_AVAIL: return "NO_SSID";
+    case WL_CONNECT_FAILED: return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    case WL_IDLE_STATUS: return "IDLE";
+    default: return "UNKNOWN";
+  }
+}
+
+static bool waitForVisibleSsid(const String& targetSsid, int waitSeconds) {
+  unsigned long startMs = millis();
+  unsigned long deadlineMs = startMs + (unsigned long)waitSeconds * 1000UL;
+  int lastScanCount = -1;
+  while (millis() < deadlineMs) {
+    int networks = WiFi.scanNetworks(false, true);
+    bool found = false;
+    for (int i = 0; i < networks; i++) {
+      if (WiFi.SSID(i) == targetSsid) {
+        found = true;
+        break;
+      }
+    }
+    WiFi.scanDelete();
+    if (found) {
+      return true;
+    }
+    if (networks != lastScanCount) {
+      Serial.printf("[WIFI_SCAN_COUNT] %d APs visible\n", networks);
+      lastScanCount = networks;
+    }
+    unsigned long nowMs = millis();
+    if (nowMs >= deadlineMs) {
+      break;
+    }
+    unsigned long remainingMs = deadlineMs - nowMs;
+    unsigned long sleepMs = WIFI_SCAN_POLL_SEC * 1000UL;
+    if (sleepMs > remainingMs) {
+      sleepMs = remainingMs;
+    }
+    delay(sleepMs);
+  }
+  return false;
+}
+
+static bool connectWifiProfile(const String& ssid, const String& password, wl_status_t* finalStatus) {
+  wl_status_t status = WL_DISCONNECTED;
+  for (int attempt = 1; attempt <= WIFI_CONNECT_RETRY_COUNT; attempt++) {
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);
+    WiFi.disconnect(true, true);
+    delay(250);
+
+    if (!waitForVisibleSsid(ssid, WIFI_SCAN_WAIT_SEC)) {
+      status = WL_NO_SSID_AVAIL;
+      Serial.printf("[WIFI_FAIL] %s (NO_SSID scan timeout)\n", ssid.c_str());
+      WiFi.mode(WIFI_OFF);
+      delay(300);
+      continue;
+    }
+
+    WiFi.begin(ssid.c_str(), password.c_str());
+    int timeout = WIFI_CONNECT_TIMEOUT_SEC;
+    while (timeout > 0) {
+      status = WiFi.status();
+      if (status == WL_CONNECTED) {
+        if (finalStatus != nullptr) *finalStatus = status;
+        return true;
+      }
+      if (status == WL_NO_SSID_AVAIL || status == WL_CONNECT_FAILED) {
+        break;
+      }
+      delay(1000);
+      timeout--;
+    }
+
+    status = WiFi.status();
+    Serial.printf("[WIFI_FAIL] %s (%s) attempt %d/%d\n", ssid.c_str(), wifiStatusToText(status), attempt, WIFI_CONNECT_RETRY_COUNT);
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    delay(300);
+  }
+
+  if (finalStatus != nullptr) *finalStatus = status;
+  return false;
+}
+
+static bool parseWifiPacketKey(const String& key, int& idx, char& kind) {
+  if (key.length() < 3 || key.charAt(0) != 'w') {
+    return false;
+  }
+
+  kind = key.charAt(key.length() - 1);
+  if (kind != 's' && kind != 'p') {
+    return false;
+  }
+
+  String idxPart = key.substring(1, key.length() - 1);
+  if (idxPart.length() == 0) {
+    return false;
+  }
+
+  for (int i = 0; i < idxPart.length(); i++) {
+    if (!isDigit(idxPart.charAt(i))) {
+      return false;
+    }
+  }
+
+  idx = idxPart.toInt();
+  return idx >= 0 && idx < MAX_WIFI_PROFILES;
+}
+
+static int findWifiProfileIndex(const String& ssid, String ssids[]) {
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (ssids[i] == ssid) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int findFirstEmptyWifiSlot(String ssids[]) {
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    if (ssids[i].length() == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void compactWifiProfiles(String ssids[], String passwords[]) {
+  int writeIdx = 0;
+  for (int readIdx = 0; readIdx < MAX_WIFI_PROFILES; readIdx++) {
+    if (ssids[readIdx].length() == 0) {
+      continue;
+    }
+    if (writeIdx != readIdx) {
+      ssids[writeIdx] = ssids[readIdx];
+      passwords[writeIdx] = passwords[readIdx];
+      ssids[readIdx] = "";
+      passwords[readIdx] = "";
+    }
+    writeIdx++;
+  }
+}
+
 void parseAndStoreWifiProfiles(const String& packet) {
   if (!packet.startsWith("SETUP:")) return;
   String data = packet.substring(6);
+  String nextSsids[MAX_WIFI_PROFILES];
+  String nextPasswords[MAX_WIFI_PROFILES];
+  String wifiOp = "";
+  String wifiOpSsid = "";
+  String wifiOpPass = "";
+
+  // Pre-scan for wop=setall so arrays are initialised empty before the main loop
+  bool wifiSetAll = (data.indexOf("wop=setall") >= 0);
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    nextSsids[i] = wifiSetAll ? "" : t_wifiSsids[i];
+    nextPasswords[i] = wifiSetAll ? "" : t_wifiPasswords[i];
+  }
 
   bool maskProvided = false;
   unsigned int setupMask = 0;
@@ -156,6 +357,19 @@ void parseAndStoreWifiProfiles(const String& packet) {
       if (key == "m") {
         setupMask = (unsigned int)value.toInt();
         maskProvided = true;
+      } else if (key == "wop") {
+        wifiOp = value;
+      } else if (key == "wssid") {
+        wifiOpSsid = value;
+      } else if (key == "wpass") {
+        wifiOpPass = value;
+      } else {
+        int idx = -1;
+        char kind = '\0';
+        if (parseWifiPacketKey(key, idx, kind)) {
+          if (kind == 's') nextSsids[idx] = value;
+          else if (kind == 'p') nextPasswords[idx] = value;
+        }
       }
     }
     start = sep + 1;
@@ -165,25 +379,47 @@ void parseAndStoreWifiProfiles(const String& packet) {
     return;
   }
 
-  start = 0;
-  while (start < (int)data.length()) {
-    int sep = data.indexOf(';', start);
-    if (sep < 0) sep = (int)data.length();
-    String token = data.substring(start, sep);
-    int eq = token.indexOf('=');
-    if (eq > 0) {
-      String key = token.substring(0, eq);
-      String value = token.substring(eq + 1);
-      key.trim(); value.trim();
-      if (key.length() == 3 && key.charAt(0) == 'w' && isDigit(key.charAt(1))) {
-        int idx = key.charAt(1) - '0';
-        if (idx >= 0 && idx < MAX_WIFI_PROFILES) {
-          if (key.charAt(2) == 's') t_wifiSsids[idx] = value;
-          else if (key.charAt(2) == 'p') t_wifiPasswords[idx] = value;
-        }
-      }
+  if (wifiOp == "add") {
+    if (wifiOpSsid.length() == 0) {
+      Serial.println("[WIFI_CFG] add requested without SSID");
+      return;
     }
-    start = sep + 1;
+    int existingIdx = findWifiProfileIndex(wifiOpSsid, nextSsids);
+    if (existingIdx >= 0) {
+      nextPasswords[existingIdx] = wifiOpPass;
+    } else {
+      int emptyIdx = findFirstEmptyWifiSlot(nextSsids);
+      if (emptyIdx < 0) {
+        Serial.printf("[WIFI_CFG] profile list full (%d max)\n", MAX_WIFI_PROFILES);
+        return;
+      }
+      nextSsids[emptyIdx] = wifiOpSsid;
+      nextPasswords[emptyIdx] = wifiOpPass;
+    }
+  } else if (wifiOp == "remove") {
+    if (wifiOpSsid.length() == 0) {
+      Serial.println("[WIFI_CFG] remove requested without SSID");
+      return;
+    }
+    int removeIdx = findWifiProfileIndex(wifiOpSsid, nextSsids);
+    if (removeIdx >= 0) {
+      nextSsids[removeIdx] = "";
+      nextPasswords[removeIdx] = "";
+      compactWifiProfiles(nextSsids, nextPasswords);
+    }
+  } else if (wifiOp == "clear") {
+    for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+      nextSsids[i] = "";
+      nextPasswords[i] = "";
+    }
+  } else if (wifiOp == "setall") {
+    // Arrays were pre-cleared and filled by indexed w#s/w#p keys during token parsing.
+    compactWifiProfiles(nextSsids, nextPasswords);
+  }
+
+  for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+    t_wifiSsids[i] = nextSsids[i];
+    t_wifiPasswords[i] = nextPasswords[i];
   }
   
   // Persist the new profiles to EEPROM
@@ -203,24 +439,16 @@ bool connectTransmitterWiFi() {
   for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
     if (t_wifiSsids[i].length() == 0) continue;
     Serial.printf("[WIFI_TRY] %s\n", t_wifiSsids[i].c_str());
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(t_wifiSsids[i].c_str(), t_wifiPasswords[i].c_str());
-    int timeout = 8;
-    while (WiFi.status() != WL_CONNECTED && timeout > 0) {
-      delay(1000);
-      timeout--;
-      if (timeout > 0 && timeout < 8) {
-        Serial.printf("[WIFI_WAIT:%d] %s\n", timeout, t_wifiSsids[i].c_str());
-      }
-    }
-    if (WiFi.status() == WL_CONNECTED) {
+    wl_status_t finalStatus = WL_DISCONNECTED;
+    if (connectWifiProfile(t_wifiSsids[i], t_wifiPasswords[i], &finalStatus)) {
       Serial.printf("[WIFI_CONNECTED] %s\n", t_wifiSsids[i].c_str());
       return true;
     }
-    Serial.printf("[WIFI_FAIL] %s\n", t_wifiSsids[i].c_str());
+    Serial.printf("[WIFI_FAIL] %s (%s)\n", t_wifiSsids[i].c_str(), wifiStatusToText(finalStatus));
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
   }
+  Serial.println("[WIFI_HINT] Use 2.4GHz hotspot WPA2; WPA3/5GHz may fail on ESP32");
   return false;
 }
 
@@ -235,19 +463,48 @@ void handleWifiServerMessage(const String& packet) {
   String ip = payload.substring(0, colonPos);
   int port = payload.substring(colonPos + 1).toInt();
 
-  if (!connectTransmitterWiFi()) {
+  // If RSP:WIFI_CONNECTED already kicked off a pre-connect, wait for it to complete
+  // (up to 15 s) before falling back to the full sequential scan.
+  bool alreadyConnected = false;
+  if (g_receiverWifiPreconnecting) {
+    Serial.println("[WIFI_PRECONNECT] Waiting for pre-connect to complete...");
+    unsigned long waitStart = millis();
+    while (millis() - waitStart < 15000UL) {
+      wl_status_t s = WiFi.status();
+      if (s == WL_CONNECTED) {
+        alreadyConnected = true;
+        break;
+      }
+      if (s == WL_CONNECT_FAILED || s == WL_NO_SSID_AVAIL) {
+        break;
+      }
+      delay(300);
+    }
+    g_receiverWifiPreconnecting = false;
+    if (alreadyConnected) {
+      Serial.printf("[WIFI_CONNECTED] %s (pre-connected)\n", WiFi.SSID().c_str());
+    } else {
+      Serial.println("[WIFI_PRECONNECT] Pre-connect failed, falling back to full scan");
+      WiFi.disconnect(true, true);
+      WiFi.mode(WIFI_OFF);
+      delay(150);
+    }
+  }
+
+  if (!alreadyConnected && !connectTransmitterWiFi()) {
     Serial.println("[WIFI_TX_FAIL] No WiFi profiles or connection failed after all attempts");
     return;
   }
 
   WiFiClient client;
   bool tcpConnected = false;
-  for (int attempt = 0; attempt < 3 && !tcpConnected; attempt++) {
+  for (int attempt = 1; attempt <= 12 && !tcpConnected; attempt++) {
     if (client.connect(ip.c_str(), port)) {
       tcpConnected = true;
-    } else {
-      delay(2000);
+      break;
     }
+    Serial.printf("[WIFI_TX_WAIT] TCP attempt %d/12 failed\n", attempt);
+    delay(1000);
   }
   if (!tcpConnected) {
     Serial.println("[WIFI_TX_FAIL] TCP connect failed");
@@ -305,7 +562,14 @@ void handleWifiServerMessage(const String& packet) {
 
 void handleLoRaMessage(const String& packet) {
   if (packet.startsWith("SETUP:")) {
+    g_setupAckReceived = true;
     Serial.printf("[SETUP_ACK] Setup echoed from receiver: %s\n", packet.c_str());
+    return;
+  }
+
+  if (packet == "RSP:SETUP_OK") {
+    g_setupAckReceived = true;
+    Serial.println("[RSP:SETUP_OK]");
     return;
   }
 
@@ -358,6 +622,28 @@ void handleLoRaMessage(const String& packet) {
     return;
   }
 
+  if (packet.startsWith("RSP:WIFI_CONNECTED:")) {
+    g_receiverConnectedSsid = packet.substring(19);
+    g_receiverConnectedSsid.trim();
+    Serial.printf("[RSP:WIFI_CONNECTED:%s]\n", g_receiverConnectedSsid.c_str());
+    // Start connecting to the receiver's network NOW so we are ready when RSP:WIFI_SERVER arrives.
+    for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+      if (t_wifiSsids[i] == g_receiverConnectedSsid && t_wifiSsids[i].length() > 0) {
+        WiFi.persistent(false);
+        WiFi.mode(WIFI_STA);
+        WiFi.setAutoReconnect(true);
+        WiFi.setSleep(false);
+        WiFi.disconnect(true, true);
+        delay(50);  // minimal settle; radio re-armed faster
+        WiFi.begin(t_wifiSsids[i].c_str(), t_wifiPasswords[i].c_str());
+        g_receiverWifiPreconnecting = true;
+        Serial.printf("[WIFI_PRECONNECT] Initiated connection to %s\n", t_wifiSsids[i].c_str());
+        break;
+      }
+    }
+    return;
+  }
+
   if (packet.startsWith("RSP:")) {
     Serial.printf("[%s]\n", packet.c_str());
     return;
@@ -405,7 +691,11 @@ void processSerialInput() {
 
   if (line.startsWith("SETUP:")) {
     parseAndStoreWifiProfiles(line);  // cache Wi-Fi profiles for TCP client step
-    sendLoRaPacket(line);
+    if (!sendSetupPacketWithAck(line)) {
+      Serial.println("[SETUP_TX_FAIL] Receiver did not acknowledge setup packet");
+    } else {
+      Serial.println("[SETUP_TX_OK]");
+    }
     return;
   }
 

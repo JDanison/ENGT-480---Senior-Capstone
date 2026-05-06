@@ -33,7 +33,7 @@ CARD_DARK         = "#162338"
 # Log line colour tags (foreground only; works on both light/dark)
 LOG_COLORS = {
     "tx":      "#60A5FA",   # bright blue â€” sent commands
-    "rx":      "#93C5FD",   # soft blue   â€” received data
+    "rx":      "#22D3EE",   # cyan        â€” received bridge/serial RX lines
     "data":    "#34D399",   # green     â€” DATA/DATC payload rows
     "status":  "#FBBF24",   # amber     â€” status/RSP lines
     "default": "#D1D5DB",   # grey      â€” everything else
@@ -52,6 +52,7 @@ SETUP_MASK_DURATION = 1 << 3
 SETUP_MASK_TRUCK_ID = 1 << 4
 SETUP_MASK_DESCRIPTION = 1 << 5
 SETUP_MASK_WIFI = 1 << 6
+MAX_WIFI_PROFILES = 12
 
 OFFLOAD_STATUS_COLORS = {
     "Idle": ("#64748B", "#94A3B8"),
@@ -185,9 +186,13 @@ class MainWindow:
         self.apply_description_var = tk.BooleanVar(value=False)
         self.apply_wifi_var = tk.BooleanVar(value=False)
 
-        # Wi-Fi credential slot (sent to receiver for Wi-Fi-first offload)
+        # Wi-Fi profile management (ordered list tried before LoRa fallback)
         self.wifi1_ssid_var = tk.StringVar(value="")
         self.wifi1_password_var = tk.StringVar(value="")
+        self.wifi_profiles = getattr(self, "wifi_profiles", [])
+        self.wifi_selected_var = tk.StringVar(value="")
+        self.wifi_profiles_menu: ctk.CTkOptionMenu | None = None
+        self.wifi_profiles_text: ctk.CTkTextbox | None = None
 
         self.send_config_button: ctk.CTkButton | None = None
         self.unit_setup_help_label: ctk.CTkLabel | None = None
@@ -1629,6 +1634,8 @@ class MainWindow:
 
         event_col = next((i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == "event #"), None)
         time_col = next((i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == "time stamp"), None)
+        temp_col = next((i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == "temp"), None)
+        rh_col = next((i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == "rh"), None)
         strain_cols = [i for i, h in enumerate(self._viewer_header_row) if h.strip().lower() == "strain" or h.strip().lower().startswith("strain_")]
         accel_cols = [i for i, h in enumerate(self._viewer_header_row) if h.strip().lower().startswith("accel")]
 
@@ -1690,6 +1697,53 @@ class MainWindow:
                 start_time = stamps[0]
                 end_time = stamps[-1]
 
+        axis_groups = _accel_axis_groups()
+
+        def _to_float(value: str) -> float | None:
+            try:
+                return float(value.strip())
+            except Exception:
+                return None
+
+        def _first_numeric(col_idx: int | None) -> float | None:
+            if col_idx is None:
+                return None
+            for row in event_rows:
+                if col_idx >= len(row):
+                    continue
+                v = _to_float(row[col_idx])
+                if v is not None:
+                    return v
+            return None
+
+        def _all_numeric(col_indices: list[int]) -> list[float]:
+            values: list[float] = []
+            for row in event_rows:
+                for col_idx in col_indices:
+                    if col_idx >= len(row):
+                        continue
+                    v = _to_float(row[col_idx])
+                    if v is not None:
+                        values.append(v)
+            return values
+
+        temp_value = _first_numeric(temp_col)
+        rh_value = _first_numeric(rh_col)
+        accel_x_values = _all_numeric(axis_groups["x"])
+        accel_y_values = _all_numeric(axis_groups["y"])
+        accel_z_values = _all_numeric(axis_groups["z"])
+        strain_values = _all_numeric(strain_cols)
+
+        def _fmt_num(value: float | None, unit: str = "") -> str:
+            if value is None:
+                return "-"
+            return f"{value:.3f}{unit}"
+
+        def _fmt_range(values: list[float]) -> str:
+            if not values:
+                return "-"
+            return f"min {_fmt_num(min(values))} | max {_fmt_num(max(values))}"
+
         if self._viewer_detail_window is not None:
             try:
                 self._viewer_detail_window.destroy()
@@ -1719,9 +1773,87 @@ class MainWindow:
         tabs = ctk.CTkTabview(win)
         tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(8, 12))
 
+        tab_summary = tabs.add("Summary")
         tab_strain = tabs.add("Strain")
         tab_accel = tabs.add("Acceleration")
         tab_dump = tabs.add("Data Dump")
+
+        summary_frame = ctk.CTkFrame(tab_summary, fg_color="transparent")
+        summary_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        summary_frame.grid_columnconfigure(0, weight=1)
+        summary_frame.grid_columnconfigure(1, weight=1)
+        summary_frame.grid_rowconfigure(0, weight=0)
+        summary_frame.grid_rowconfigure(1, weight=1)
+
+        hero_card = ctk.CTkFrame(summary_frame, corner_radius=12, fg_color=("#E2E8F0", "#1E293B"))
+        hero_card.grid(row=0, column=0, columnspan=2, sticky="ew", padx=2, pady=(0, 10))
+        hero_card.grid_columnconfigure(0, weight=1)
+        hero_card.grid_columnconfigure(1, weight=0)
+        ctk.CTkLabel(
+            hero_card,
+            text=f"Event #{selected_event if selected_event is not None else '-'}",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color=("#0F172A", "#E2E8F0"),
+        ).grid(row=0, column=0, sticky="w", padx=14, pady=(10, 2))
+        ctk.CTkLabel(
+            hero_card,
+            text=f"Samples: {len(event_rows)}",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=("#334155", "#94A3B8"),
+        ).grid(row=0, column=1, sticky="e", padx=14, pady=(10, 2))
+        ctk.CTkLabel(
+            hero_card,
+            text=f"{start_time} -> {end_time}",
+            font=ctk.CTkFont(size=12),
+            text_color=("#475569", "#94A3B8"),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
+
+        cards_grid = ctk.CTkFrame(summary_frame, fg_color="transparent")
+        cards_grid.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        cards_grid.grid_columnconfigure(0, weight=1)
+        cards_grid.grid_columnconfigure(1, weight=1)
+        cards_grid.grid_rowconfigure(0, weight=1)
+        cards_grid.grid_rowconfigure(1, weight=1)
+
+        def _metric_card(parent: ctk.CTkFrame, title: str, row: int, col: int, col_span: int = 1) -> ctk.CTkFrame:
+            card = ctk.CTkFrame(parent, corner_radius=12, fg_color=("#F1F5F9", "#111827"))
+            card.grid(row=row, column=col, columnspan=col_span, sticky="nsew", padx=6, pady=6)
+            card.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                card,
+                text=title,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=("#334155", "#93C5FD"),
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 6))
+            return card
+
+        def _add_card_metric(card: ctk.CTkFrame, row: int, label: str, value: str) -> None:
+            ctk.CTkLabel(
+                card,
+                text=label,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=("#64748B", "#9CA3AF"),
+            ).grid(row=row, column=0, sticky="w", padx=12, pady=(2, 0))
+            ctk.CTkLabel(
+                card,
+                text=value,
+                font=ctk.CTkFont(size=15, weight="bold"),
+                text_color=("#0F172A", "#E5E7EB"),
+            ).grid(row=row + 1, column=0, sticky="w", padx=12, pady=(0, 8))
+
+        card_env = _metric_card(cards_grid, "Environment", 0, 0)
+        _add_card_metric(card_env, 1, "Temperature", _fmt_num(temp_value, " C"))
+        _add_card_metric(card_env, 3, "Humidity", _fmt_num(rh_value, " %"))
+
+        card_strain = _metric_card(cards_grid, "Strain", 0, 1)
+        _add_card_metric(card_strain, 1, "Max Strain", _fmt_num(max(strain_values) if strain_values else None))
+
+        card_accel = _metric_card(cards_grid, "Acceleration", 1, 0, col_span=2)
+        _add_card_metric(card_accel, 1, "Accel X", _fmt_range(accel_x_values))
+        _add_card_metric(card_accel, 3, "Accel Y", _fmt_range(accel_y_values))
+        _add_card_metric(card_accel, 5, "Accel Z", _fmt_range(accel_z_values))
+
+        tabs.set("Summary")
 
         if strain_cols:
             self._draw_viewer_range_graph(tab_strain, event_rows, strain_cols, "Strain Envelope by Channel", x_label_mode="number")
@@ -1729,7 +1861,6 @@ class MainWindow:
             ctk.CTkLabel(tab_strain, text="No strain columns in this workbook.").pack(anchor="w", padx=10, pady=10)
 
         if accel_cols:
-            axis_groups = _accel_axis_groups()
             accel_tabs = ctk.CTkTabview(tab_accel)
             accel_tabs.pack(fill="both", expand=True, padx=6, pady=0)
             tab_x = accel_tabs.add("X")
@@ -2454,11 +2585,22 @@ class MainWindow:
             messagebox.showerror("Send Error", str(exc))
 
     def _classify_line(self, line: str) -> str:
-        if "TX>" in line:
+        stripped = line.strip()
+        if "TX>" in stripped or stripped.startswith("[TX]"):
             return "tx"
-        if line.startswith("DATA:") or line.startswith("DATC:") or line.startswith("EVENT_FILE:"):
+        if stripped.startswith("[RX]"):
+            return "rx"
+        if stripped.startswith("DATA:") or stripped.startswith("DATC:") or stripped.startswith("EVENT_FILE:"):
             return "data"
-        if line.startswith("RSP:") or line.startswith("END:") or line.startswith("["):
+        if (
+            stripped.startswith("RSP:")
+            or stripped.startswith("[RSP:")
+            or stripped.startswith("END:")
+            or stripped.startswith("[WIFI")
+            or stripped.startswith("[TRANSFER")
+            or stripped.startswith("[STATUS")
+            or stripped.startswith("[")
+        ):
             return "status"
         return "rx"
 
@@ -2601,6 +2743,10 @@ class MainWindow:
     def _get_offload_status_color(self) -> tuple[str, str]:
         return OFFLOAD_STATUS_COLORS.get(self.offload_status, ("#64748B", "#94A3B8"))
 
+    def _get_offload_event_count(self) -> int:
+        pending = 1 if self._offload_pending_event_name is not None else 0
+        return len(self._offload_saved_files) + pending
+
     def _update_offload_status_display(self) -> None:
         """Update the offload status card with current stats."""
         elapsed_text = "Elapsed: —"
@@ -2653,8 +2799,8 @@ class MainWindow:
         self.offload_connection_label.configure(text=connection_text)
         self.offload_duration_label.configure(text=transfer_text)
 
-        # Events count
-        self.offload_events_label.configure(text=f"Events: {self.offload_events_count}")
+        # Event count is file-based, not row-based.
+        self.offload_events_label.configure(text=f"Events: {self._get_offload_event_count()}")
 
         # Last message
         self.offload_message_label.configure(text=f"Last: {self.offload_last_status}")
@@ -2673,6 +2819,8 @@ class MainWindow:
             self.offload_last_status = "Wi-Fi starting"
         # Wi-Fi connection attempts
         elif "RSP:WIFI_TRY:" in line or "[WIFI_TRY]" in line:
+            if not self.offload_in_progress:
+                return
             self.offload_status = "Connecting..."
             try:
                 if "RSP:WIFI_TRY:" in line:
@@ -2684,26 +2832,38 @@ class MainWindow:
                 self.offload_last_status = "Trying Wi-Fi..."
         # Wi-Fi connected successfully
         elif "RSP:WIFI_CONNECTED:" in line or "[RSP:WIFI_CONNECTED:" in line:
+            if not self.offload_in_progress:
+                return
             self.offload_status = "Connecting..."
             try:
                 ssid = line.split("WIFI_CONNECTED:")[-1].strip().rstrip("]")
                 self.offload_last_status = f"WiFi connected: {ssid}"
             except:
                 self.offload_last_status = "WiFi connected"
+            self.offload_connected_time = time.time()
+            if self.offload_wifi_start_time:
+                self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
         # TCP server ready
         elif "RSP:WIFI_SERVER:" in line or "[WIFI_SERVER]" in line:
+            if not self.offload_in_progress:
+                return
             self.offload_status = "Connecting..."
             self.offload_last_status = "TCP server ready"
         # Transmitter connected to TCP (data transfer beginning)
         elif "WIFI_TX_CONNECTED" in line or "RSP:WIFI_TX_CONNECTED" in line:
-            self.offload_connected_time = time.time()
+            if not self.offload_in_progress:
+                return
             self.offload_data_start_time = time.time()
-            if self.offload_wifi_start_time:
+            if self.offload_connected_time is None:
+                self.offload_connected_time = self.offload_data_start_time
+            if self.offload_wifi_start_time and self.offload_connection_duration is None:
                 self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
             self.offload_status = "Transferring..."
             self.offload_last_status = "Transmitter connected"
         # Wi-Fi countdown during TCP wait
         elif "RSP:WIFI_WAIT:" in line or "[RSP:WIFI_WAIT:" in line or "[WIFI_WAIT:" in line:
+            if not self.offload_in_progress:
+                return
             try:
                 countdown = line.split("WIFI_WAIT:")[-1].strip().rstrip("]").split()[0]
                 self.offload_status = "Connecting..."
@@ -2721,6 +2881,7 @@ class MainWindow:
                 if self.offload_data_start_time is None:
                     self.offload_data_start_time = time.time()
                 self.offload_status = "Transferring..."
+            self.offload_events_count = self._get_offload_event_count()
         # Partial LoRa chunk — accumulate until a final DATA: completes the row
         elif line.startswith("DATC:"):
             if self.offload_status != "Transferring...":
@@ -2736,7 +2897,6 @@ class MainWindow:
             self._offload_lora_row_buf = ""
             if self._offload_pending_event_name is not None:
                 self._offload_pending_rows.append(complete_row)
-            self.offload_events_count += 1
         # Raw data lines (numbers/CSV without DATA: prefix) during active transfer
         # Handles both digit-prefixed values and quoted timestamps ("Time not set",...)
         elif self.offload_in_progress and self.offload_data_start_time and line and (
@@ -2747,19 +2907,12 @@ class MainWindow:
                 self.offload_status = "Transferring..."
             if self._offload_pending_event_name is not None:
                 self._offload_pending_rows.append(line)
-            self.offload_events_count += 1
         # TRANSFER summary message - arrives after END:D, update event count in last status
         elif "[TRANSFER]" in line:
             try:
                 if "duration=" in line:
                     duration_str = line.split("duration=")[1].split()[0].strip().rstrip("ms")
                     self.offload_transfer_duration = float(duration_str) / 1000.0
-                if "lines=" in line:
-                    lines_str = line.split("lines=")[1].split()[0].strip()
-                    self.offload_events_count = int(lines_str)
-                    # Update last_status to replace the "0 events" with the real count
-                    if self.offload_status == "Complete":
-                        self.offload_last_status = self.offload_last_status.rsplit(",", 1)[0] + f", {self.offload_events_count} events)"
             except:
                 pass
             self._update_offload_status_display()
@@ -2776,6 +2929,7 @@ class MainWindow:
                     self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
                 self.offload_in_progress = False
                 self.offload_status = "Complete"
+                self.offload_events_count = len(self._offload_saved_files)
                 saved_count = len(self._offload_saved_files)
                 save_note = f" - {saved_count} file(s) saved" if saved_count else ""
                 workbook_note = self._ensure_session_excel_summary() if saved_count else ""
@@ -2795,6 +2949,7 @@ class MainWindow:
                     self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
                 self.offload_in_progress = False
                 saved_count = len(self._offload_saved_files)
+                self.offload_events_count = saved_count
                 if saved_count > 0:
                     self.offload_status = "Complete"
                     workbook_note = self._ensure_session_excel_summary()
@@ -2806,32 +2961,18 @@ class MainWindow:
                     self.offload_status = "Timeout"
                     self.offload_last_status = f"Wi-Fi timeout ({total_dur:.1f}s)"
                 self._update_offload_status_display()
-        # Wi-Fi connection failed
+        # Wi-Fi connection attempt failed; keep the session alive so retries or LoRa fallback can continue.
         elif "RSP:WIFI_FAIL:" in line or "[WIFI_FAIL]" in line:
-            if self.offload_in_progress:
-                self._save_pending_event()  # flush last event file before ending
-                if self.offload_start_time:
-                    self.offload_end_time = time.time() - self.offload_start_time
-                if self.offload_wifi_start_time and self.offload_connected_time:
-                    self.offload_connection_duration = self.offload_connected_time - self.offload_wifi_start_time
-                if self.offload_data_start_time:
-                    self.offload_transfer_duration = time.time() - self.offload_data_start_time
-                self.offload_in_progress = False
-                self.offload_status = "Failed"
-                saved_count = len(self._offload_saved_files)
-                try:
-                    if "[WIFI_FAIL]" in line:
-                        network = line.split("[WIFI_FAIL]")[-1].strip()
-                    else:
-                        network = line.split("RSP:WIFI_FAIL:")[-1].strip().rstrip("]")
-                    save_note = f" - {saved_count} file(s) saved" if saved_count else ""
-                    workbook_note = self._ensure_session_excel_summary() if saved_count else ""
-                    self.offload_last_status = f"Wi-Fi failed: {network}{save_note}{workbook_note}"
-                except:
-                    save_note = f" - {saved_count} file(s) saved" if saved_count else ""
-                    workbook_note = self._ensure_session_excel_summary() if saved_count else ""
-                    self.offload_last_status = f"Wi-Fi failed{save_note}{workbook_note}"
-                self._update_offload_status_display()
+            self.offload_status = "Connecting..."
+            try:
+                if "[WIFI_FAIL]" in line:
+                    network = line.split("[WIFI_FAIL]")[-1].strip()
+                else:
+                    network = line.split("RSP:WIFI_FAIL:")[-1].strip().rstrip("]")
+                self.offload_last_status = f"Wi-Fi failed: {network}"
+            except:
+                self.offload_last_status = "Wi-Fi failed"
+            self._update_offload_status_display()
         # Wi-Fi transmission layer failed (TCP, no profiles, or exhausted attempts)
         elif "[WIFI_TX_FAIL]" in line or "RSP:WIFI_TX_FAIL" in line:
             if self.offload_in_progress:
@@ -2845,6 +2986,7 @@ class MainWindow:
                 self.offload_in_progress = False
                 self.offload_status = "Connection Failed"
                 saved_count = len(self._offload_saved_files)
+                self.offload_events_count = saved_count
                 try:
                     if "[WIFI_TX_FAIL]" in line:
                         reason = line.split("[WIFI_TX_FAIL]")[-1].strip()
@@ -2862,6 +3004,10 @@ class MainWindow:
                 self._update_offload_status_display()
         # Fallback to LoRa
         elif "RSP:WIFI_FALLBACK_LORA" in line or "WIFI_FALLBACK_LORA" in line:
+            if not self.offload_in_progress:
+                self._reset_offload_stats()
+            if self.offload_data_start_time is None:
+                self.offload_data_start_time = time.time()
             self.offload_status = "Fallback LoRa"
             self.offload_last_status = "Switched to LoRa"
         # Receiver confirms stored events were cleared after offload
@@ -2880,6 +3026,7 @@ class MainWindow:
                 self.offload_in_progress = False
                 self.offload_status = "No Data"
                 saved_count = len(self._offload_saved_files)
+                self.offload_events_count = saved_count
                 save_note = f" - {saved_count} file(s) saved" if saved_count else ""
                 workbook_note = self._ensure_session_excel_summary() if saved_count else ""
                 self.offload_last_status = f"No events to transfer ({total_dur:.1f}s){save_note}{workbook_note}"
@@ -2918,7 +3065,7 @@ class MainWindow:
         if self.apply_description_var.get():
             labels.append("Description")
         if self.apply_wifi_var.get():
-            labels.append("Wi-Fi Network")
+            labels.append("Wi-Fi Networks")
         return labels
 
     def _update_send_config_button(self) -> None:
@@ -2945,6 +3092,182 @@ class MainWindow:
     def _set_all_setup_selection(self, selected: bool) -> None:
         for var in self._setup_apply_vars:
             var.set(selected)
+
+    def _sanitize_setup_text(self, value: str) -> str:
+        return value.replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
+
+    def _refresh_wifi_profiles_ui(self) -> None:
+        ssids = [profile["ssid"] for profile in self.wifi_profiles if profile.get("ssid")]
+        menu_values = ssids if ssids else ["(none)"]
+
+        if self.wifi_profiles_menu is not None:
+            self.wifi_profiles_menu.configure(values=menu_values)
+
+        if ssids:
+            current = self.wifi_selected_var.get().strip()
+            self.wifi_selected_var.set(current if current in ssids else ssids[0])
+        else:
+            self.wifi_selected_var.set("(none)")
+
+        if self.wifi_profiles_text is not None:
+            self.wifi_profiles_text.configure(state="normal")
+            self.wifi_profiles_text.delete("1.0", "end")
+            if ssids:
+                lines = [f"{idx + 1}. {ssid}" for idx, ssid in enumerate(ssids)]
+                self.wifi_profiles_text.insert("1.0", "\n".join(lines))
+            else:
+                self.wifi_profiles_text.insert("1.0", "No saved Wi-Fi networks.")
+            self.wifi_profiles_text.configure(state="disabled")
+
+    def _upsert_wifi_profile_local(self, ssid: str, password: str) -> tuple[str, bool]:
+        clean_ssid = self._sanitize_setup_text(ssid)
+        clean_password = self._sanitize_setup_text(password)
+        if not clean_ssid:
+            return "", False
+
+        for idx, profile in enumerate(self.wifi_profiles):
+            if profile.get("ssid") == clean_ssid:
+                # Keep updated networks at highest priority (top of list).
+                del self.wifi_profiles[idx]
+                self.wifi_profiles.insert(0, {"ssid": clean_ssid, "password": clean_password})
+                self._save_app_settings()
+                self._refresh_wifi_profiles_ui()
+                return clean_ssid, False
+
+        if len(self.wifi_profiles) >= MAX_WIFI_PROFILES:
+            raise ValueError(f"Maximum saved Wi-Fi profiles reached ({MAX_WIFI_PROFILES}). Remove one before adding another.")
+
+        # New entries become highest-priority network.
+        self.wifi_profiles.insert(0, {"ssid": clean_ssid, "password": clean_password})
+        self._save_app_settings()
+        self._refresh_wifi_profiles_ui()
+        return clean_ssid, True
+
+    def _remove_wifi_profile_local(self, ssid: str) -> bool:
+        for idx, profile in enumerate(self.wifi_profiles):
+            if profile.get("ssid") == ssid:
+                del self.wifi_profiles[idx]
+                self._save_app_settings()
+                self._refresh_wifi_profiles_ui()
+                return True
+        return False
+
+    def _send_wifi_profile_operation(self, operation: str, ssid: str = "", password: str = "") -> None:
+        if not self._is_transmitter_connected():
+            return
+
+        fields = [f"m={SETUP_MASK_WIFI}", f"wop={operation}"]
+        if ssid:
+            fields.append(f"wssid={self._sanitize_setup_text(ssid)}")
+        if password:
+            fields.append(f"wpass={self._sanitize_setup_text(password)}")
+
+        packet = "SETUP:" + ";".join(fields)
+        if len(packet.encode("utf-8")) > 220:
+            raise ValueError("Wi-Fi update packet is too large for LoRa setup forwarding.")
+
+        self.serial_service.send_text(packet + "\n")
+
+    def _send_setup_packet_reliably(self, packet: str, repeats: int = 1, pause_seconds: float = 0.12) -> None:
+        if len(packet.encode("utf-8")) > 220:
+            raise ValueError("Setup packet is too large for LoRa setup forwarding.")
+
+        for attempt in range(repeats):
+            self.serial_service.send_text(packet + "\n")
+            # Small pacing reduces serial/LoRa burst loss when syncing many Wi-Fi entries.
+            if attempt < repeats - 1:
+                time.sleep(pause_seconds)
+
+    def _move_selected_wifi_profile(self, delta: int) -> None:
+        selected_ssid = self.wifi_selected_var.get().strip()
+        if not selected_ssid or selected_ssid == "(none)":
+            messagebox.showwarning("No Selection", "Select a Wi-Fi network first.")
+            return
+
+        current_index = -1
+        for idx, profile in enumerate(self.wifi_profiles):
+            if profile.get("ssid") == selected_ssid:
+                current_index = idx
+                break
+
+        if current_index < 0:
+            messagebox.showwarning("Not Found", "Selected Wi-Fi network was not found.")
+            return
+
+        new_index = current_index + delta
+        if new_index < 0 or new_index >= len(self.wifi_profiles):
+            return
+
+        profile = self.wifi_profiles.pop(current_index)
+        self.wifi_profiles.insert(new_index, profile)
+        self._save_app_settings()
+        self._refresh_wifi_profiles_ui()
+        self.wifi_selected_var.set(selected_ssid)
+
+    def _move_selected_wifi_up(self) -> None:
+        self._move_selected_wifi_profile(-1)
+
+    def _move_selected_wifi_down(self) -> None:
+        self._move_selected_wifi_profile(1)
+
+    def _add_wifi_profile(self) -> None:
+        ssid = self.wifi1_ssid_var.get()
+        password = self.wifi1_password_var.get()
+
+        if self._sanitize_setup_text(password) and not self._sanitize_setup_text(ssid):
+            messagebox.showwarning("Wi-Fi Setup Error", "Wi-Fi password is set, but the SSID is empty.")
+            return
+
+        try:
+            clean_ssid, added = self._upsert_wifi_profile_local(ssid, password)
+        except ValueError as exc:
+            messagebox.showwarning("Wi-Fi Profile Limit", str(exc))
+            return
+
+        if not clean_ssid:
+            messagebox.showwarning("Wi-Fi Setup Error", "Enter an SSID to add a Wi-Fi profile.")
+            return
+
+        self.wifi1_ssid_var.set("")
+        self.wifi1_password_var.set("")
+        messagebox.showinfo(
+            "Wi-Fi Saved",
+            f"Wi-Fi profile {'added' if added else 'updated'}: {clean_ssid}"
+            + "\nSaved locally. Check Wi-Fi Network and click Send Configuration to sync.",
+        )
+
+    def _remove_selected_wifi_profile(self) -> None:
+        selected_ssid = self.wifi_selected_var.get().strip()
+        if not selected_ssid or selected_ssid == "(none)":
+            messagebox.showwarning("No Selection", "Select a Wi-Fi network to remove.")
+            return
+
+        if not self._remove_wifi_profile_local(selected_ssid):
+            messagebox.showwarning("Not Found", "Selected Wi-Fi network was not found.")
+            return
+
+        messagebox.showinfo(
+            "Wi-Fi Removed",
+            f"Removed Wi-Fi profile: {selected_ssid}"
+            + "\nRemoved locally. Check Wi-Fi Network and click Send Configuration to sync.",
+        )
+
+    def _clear_wifi_profiles(self) -> None:
+        if not self.wifi_profiles:
+            messagebox.showinfo("Wi-Fi Profiles", "No saved Wi-Fi networks to clear.")
+            return
+
+        if not messagebox.askyesno("Clear Wi-Fi Profiles", "Remove all saved Wi-Fi networks?"):
+            return
+
+        self.wifi_profiles.clear()
+        self._save_app_settings()
+        self._refresh_wifi_profiles_ui()
+
+        messagebox.showinfo(
+            "Wi-Fi Cleared",
+            "All saved Wi-Fi networks were removed.\nCheck Wi-Fi Network and click Send Configuration to sync.",
+        )
 
     def _role_from_banner(self, line: str) -> str | None:
         lowered = line.lower()
@@ -3180,12 +3503,13 @@ class MainWindow:
         wifi_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         wifi_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         wifi_card.grid_columnconfigure(1, weight=1)
+        wifi_card.grid_columnconfigure(2, weight=0)
 
         ctk.CTkLabel(
             wifi_card,
-            text="Wi-Fi Offload Network",
+            text="Wi-Fi Offload Networks (Priority Order)",
             font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 6))
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(14, 6))
 
         ctk.CTkLabel(wifi_card, text="SSID", text_color=("#475569", "#94A3B8")).grid(
             row=1, column=0, sticky="w", padx=16, pady=6
@@ -3196,15 +3520,81 @@ class MainWindow:
             placeholder_text="Wi-Fi SSID",
         ).grid(row=1, column=1, sticky="ew", padx=(6, 16), pady=6)
 
+        ctk.CTkButton(
+            wifi_card,
+            text="Add / Update",
+            width=116,
+            command=self._add_wifi_profile,
+            fg_color=WABASH_BLUE,
+            hover_color=WABASH_BLUE_HOVER,
+        ).grid(row=1, column=2, sticky="e", padx=(0, 16), pady=6)
+
         ctk.CTkLabel(wifi_card, text="Password", text_color=("#475569", "#94A3B8")).grid(
-            row=2, column=0, sticky="w", padx=16, pady=(6, 14)
+            row=2, column=0, sticky="w", padx=16, pady=6
         )
         ctk.CTkEntry(
             wifi_card,
             textvariable=self.wifi1_password_var,
             placeholder_text="Wi-Fi Password",
             show="*",
-        ).grid(row=2, column=1, sticky="ew", padx=(6, 16), pady=(6, 14))
+        ).grid(row=2, column=1, sticky="ew", padx=(6, 16), pady=6)
+
+        ctk.CTkLabel(wifi_card, text="Saved Networks", text_color=("#475569", "#94A3B8")).grid(
+            row=3, column=0, sticky="w", padx=16, pady=(6, 4)
+        )
+        self.wifi_profiles_menu = ctk.CTkOptionMenu(
+            wifi_card,
+            values=["(none)"],
+            variable=self.wifi_selected_var,
+            fg_color=WABASH_BLUE,
+            button_color=WABASH_BLUE_HOVER,
+            button_hover_color=WABASH_BLUE_HOVER,
+        )
+        self.wifi_profiles_menu.grid(row=3, column=1, sticky="ew", padx=(6, 16), pady=(6, 4))
+        ctk.CTkButton(
+            wifi_card,
+            text="Remove Selected",
+            width=116,
+            command=self._remove_selected_wifi_profile,
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+        ).grid(row=3, column=2, sticky="e", padx=(0, 16), pady=(6, 4))
+
+        ctk.CTkButton(
+            wifi_card,
+            text="Move Up",
+            width=116,
+            command=self._move_selected_wifi_up,
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+        ).grid(row=4, column=2, sticky="e", padx=(0, 16), pady=(0, 4))
+
+        ctk.CTkButton(
+            wifi_card,
+            text="Move Down",
+            width=116,
+            command=self._move_selected_wifi_down,
+            fg_color=BTN_GREY,
+            hover_color=BTN_GREY_HOVER,
+        ).grid(row=5, column=2, sticky="e", padx=(0, 16), pady=(0, 4))
+
+        self.wifi_profiles_text = ctk.CTkTextbox(
+            wifi_card,
+            height=88,
+            wrap="none",
+        )
+        self.wifi_profiles_text.grid(row=4, column=0, columnspan=2, rowspan=2, sticky="ew", padx=16, pady=(2, 14))
+        ctk.CTkButton(
+            wifi_card,
+            text="Clear All",
+            width=116,
+            command=self._clear_wifi_profiles,
+            fg_color="#B91C1C",
+            hover_color="#991B1B",
+            text_color="#FEE2E2",
+        ).grid(row=6, column=2, sticky="ne", padx=(0, 16), pady=(2, 14))
+
+        self._refresh_wifi_profiles_ui()
 
         desc_card = ctk.CTkFrame(page, corner_radius=14, fg_color=(CARD_LIGHT, CARD_DARK))
         desc_card.grid(row=5, column=0, sticky="ew", pady=(0, 12))
@@ -3213,7 +3603,7 @@ class MainWindow:
         self.unit_setup_desc_card = desc_card
         self.unit_setup_help_label = ctk.CTkLabel(
             desc_card,
-            text="Select the fields to include above. Unselected values are left unchanged on the receiver. Selecting Wi-Fi with blank SSID/password clears the stored Wi-Fi network. To send a configuration, at least one field must be selected and you must be connected to a transmitter.",
+            text="Select the fields to include above. Unselected values are left unchanged on the receiver. Add / Update, Remove Selected, and Clear All edit the local Wi-Fi priority list only. To sync Wi-Fi networks to transmitter/receiver, check Wi-Fi Network and click Send Configuration.",
             wraplength=800,
             justify="left",
             text_color=("#334155", "#CBD5E1"),
@@ -3238,7 +3628,7 @@ class MainWindow:
             ("Trigger Threshold", self.apply_threshold_var),
             ("Poll Rate", self.apply_sample_rate_var),
             ("Capture Duration", self.apply_duration_var),
-            ("Wi-Fi Network", self.apply_wifi_var),
+            ("Wi-Fi Networks", self.apply_wifi_var),
         ]
         for idx, (label, var) in enumerate(update_options):
             row = 1 + (idx // 3)
@@ -3334,6 +3724,17 @@ class MainWindow:
                     settings = json.load(f)
                 if settings.get("data_path"):
                     self.data_path_var.set(settings["data_path"])
+                raw_profiles = settings.get("wifi_profiles", [])
+                if isinstance(raw_profiles, list):
+                    parsed: list[dict[str, str]] = []
+                    for item in raw_profiles:
+                        if not isinstance(item, dict):
+                            continue
+                        ssid = self._sanitize_setup_text(str(item.get("ssid", "")))
+                        password = self._sanitize_setup_text(str(item.get("password", "")))
+                        if ssid and len(parsed) < MAX_WIFI_PROFILES:
+                            parsed.append({"ssid": ssid, "password": password})
+                    self.wifi_profiles = parsed
         except Exception:
             pass
 
@@ -3341,7 +3742,14 @@ class MainWindow:
         try:
             _APP_DIR.mkdir(parents=True, exist_ok=True)
             with _SETTINGS_FILE.open("w", encoding="utf-8") as f:
-                json.dump({"data_path": self.data_path_var.get()}, f, indent=2)
+                json.dump(
+                    {
+                        "data_path": self.data_path_var.get(),
+                        "wifi_profiles": self.wifi_profiles,
+                    },
+                    f,
+                    indent=2,
+                )
         except Exception:
             pass
 
@@ -3580,54 +3988,69 @@ class MainWindow:
             if self.apply_duration_var.get():
                 duration = int(self.event_duration_var.get().strip())
 
-            truck_id = self.truck_id_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
-            description = self.description_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
+            truck_id = self._sanitize_setup_text(self.truck_id_var.get())
+            description = self._sanitize_setup_text(self.description_var.get())
+            wifi_selected = self.apply_wifi_var.get()
+            non_wifi_mask = setup_mask & ~SETUP_MASK_WIFI
 
-            wifi_ssid = self.wifi1_ssid_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
-            wifi_password = self.wifi1_password_var.get().replace(";", " ").replace("=", " ").replace("\n", " ").replace("\r", " ").strip()
-
-            if self.apply_wifi_var.get() and wifi_password and not wifi_ssid:
-                messagebox.showwarning(
-                    "Wi-Fi Setup Error",
-                    "Wi-Fi password is set, but the SSID is empty.",
+            if non_wifi_mask != 0:
+                packet = (
+                    f"SETUP:m={non_wifi_mask};si={interval};thr={threshold};sr={sample_rate};dur={duration};"
+                    f"tid={truck_id};desc={description}"
                 )
-                return
+                try:
+                    self._send_setup_packet_reliably(packet, repeats=1)
+                except ValueError:
+                    messagebox.showwarning(
+                        "Setup Too Large",
+                        "Configuration is too large for a single LoRa setup packet. "
+                        "Shorten description values and try again.",
+                    )
+                    return
 
-            wifi_fields = [
-                f"w0s={wifi_ssid}",
-                f"w0p={wifi_password}",
-                "w1s=",
-                "w1p=",
-                "w2s=",
-                "w2p=",
-            ]
+            wifi_synced = 0
+            if wifi_selected:
+                if not self.wifi_profiles:
+                    messagebox.showerror(
+                        "No Wi-Fi Profiles",
+                        "Wi-Fi Networks is selected, but your local saved list is empty. "
+                        "To protect receiver/transmitter Wi-Fi settings, sync is blocked. "
+                        "Add at least one network before sending Wi-Fi updates.",
+                    )
+                    return
 
-            packet = (
-                f"SETUP:m={setup_mask};si={interval};thr={threshold};sr={sample_rate};dur={duration};"
-                f"tid={truck_id};desc={description};"
-                + ";".join(wifi_fields)
-            )
+                # Build a single setall packet: SETUP:m=64;wop=setall;w0s=SSID;w0p=PASS;w1s=...
+                # This replaces clear+add×N with one atomic transmission and one ACK.
+                parts = [f"SETUP:m={SETUP_MASK_WIFI};wop=setall"]
+                idx = 0
+                for profile in self.wifi_profiles:
+                    ssid = self._sanitize_setup_text(profile.get("ssid", ""))
+                    if not ssid:
+                        continue
+                    password = self._sanitize_setup_text(profile.get("password", ""))
+                    parts.append(f"w{idx}s={ssid}")
+                    parts.append(f"w{idx}p={password}")
+                    idx += 1
+                    wifi_synced += 1
 
-            # Transmitter forwards SETUP in one LoRa frame, so keep payload conservative.
-            if len(packet.encode("utf-8")) > 220:
-                messagebox.showwarning(
-                    "Setup Too Large",
-                    "Configuration is too large for a single LoRa setup packet. "
-                    "Shorten SSID/password/description values and try again.",
-                )
-                return
+                setall_packet = ";".join(parts)
+                try:
+                    self._send_setup_packet_reliably(setall_packet, repeats=1)
+                except ValueError:
+                    messagebox.showwarning(
+                        "Setup Too Large",
+                        "Wi-Fi profile list is too large for a single LoRa packet. "
+                        "Shorten SSIDs/passwords or reduce the number of profiles.",
+                    )
+                    return
 
-            wire_payload = f"{packet}\n"
-            self.serial_service.send_text(wire_payload)
-
-            wifi_configured = 1 if (self.apply_wifi_var.get() and wifi_ssid) else 0
             updated_fields = ", ".join(self._get_selected_setup_labels())
 
             messagebox.showinfo(
                 "Configuration Sent",
                 f"Unit configuration sent:\n\n"
                 f"Fields Updated: {updated_fields}\n"
-                f"Wi-Fi Network Saved: {wifi_configured}"
+                f"Wi-Fi Networks Synced: {wifi_synced if wifi_selected else 0}"
             )
         except ValueError:
             messagebox.showerror("Invalid Input", "Selected numeric fields must contain valid numeric values.")

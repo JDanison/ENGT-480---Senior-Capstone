@@ -94,11 +94,14 @@ extern unsigned int LAB_TEST_SAMPLE_RATE_HZ;    // Lab test sampling rate (10 or
 #define DAYLIGHT_OFFSET_SEC     3600                    // Daylight saving time offset (1 hour)
 
 // WiFi peer-to-peer offload profile storage
-#define MAX_WIFI_PROFILES        3
+#define MAX_WIFI_PROFILES        12
 #define WIFI_PROFILE_FILE        "/wifi/profiles.txt"
-#define WIFI_CONNECT_TIMEOUT_SEC 8
+#define WIFI_CONNECT_TIMEOUT_SEC 20
+#define WIFI_CONNECT_RETRY_COUNT 2
+#define WIFI_SCAN_WAIT_SEC       12
+#define WIFI_SCAN_POLL_SEC       2
 #define WIFI_SERVER_PORT         8080
-#define WIFI_CLIENT_TIMEOUT_SEC  35   // Seconds receiver waits for transmitter TCP connection
+#define WIFI_CLIENT_TIMEOUT_SEC  60   // Seconds receiver waits for transmitter TCP connection
 
 
 /**
